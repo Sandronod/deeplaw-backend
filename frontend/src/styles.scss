@@ -1,0 +1,11 @@
+/* Custom overrides — Tailwind utilities come from tailwind.css */
+
+html, body { height: 100%; font-size: 16px; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+.scrollbar-sidebar::-webkit-scrollbar-thumb { background: #3a3a3a; }
+.scrollbar-sidebar::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }

@@ -1,0 +1,61 @@
+.layout {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0; /* flex child-ებს სწორი scroll-ისთვის საჭიროა */
+}
+
+/* host element-ები flex child-ებად */
+app-chat-thread {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+app-chat-input {
+  flex-shrink: 0; /* input ყოველთვის ბოლოში, ზომა არ იცვლება */
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-muted);
+
+  .empty-icon { font-size: 48px; }
+
+  h2 {
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  p { font-size: 14px; }
+
+  .new-chat-btn {
+    margin-top: 8px;
+    padding: 10px 24px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-md);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+
+    &:hover { background: var(--accent-hover); }
+  }
+}

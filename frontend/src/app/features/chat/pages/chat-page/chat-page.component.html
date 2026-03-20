@@ -1,0 +1,22 @@
+<div class="layout">
+  <app-sidebar />
+
+  <main class="main">
+    @if (chatService.activeChat()) {
+      <app-chat-thread />
+      <app-chat-input
+        [disabled]="chatService.isSending()"
+        (messageSent)="onSend($event)"
+      />
+    } @else {
+      <div class="empty-state">
+        <div class="empty-icon">⚖️</div>
+        <h2>სამართლებრივი AI ჩატი</h2>
+        <p>დაიწყეთ ახალი ჩატი ან აირჩიეთ არსებული</p>
+        <button class="new-chat-btn" (click)="chatService.newChat()">
+          + ახალი ჩატი
+        </button>
+      </div>
+    }
+  </main>
+</div>

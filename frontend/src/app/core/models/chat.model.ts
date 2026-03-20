@@ -1,0 +1,6 @@
+export interface Chat {
+  id: number;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
