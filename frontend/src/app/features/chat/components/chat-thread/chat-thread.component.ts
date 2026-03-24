@@ -1,4 +1,4 @@
-import { Component, AfterViewChecked, ElementRef, ViewChild, effect } from '@angular/core';
+import { Component, ElementRef, ViewChild, effect, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ChatService } from '../../../../core/services/chat.service';
 import { MessageItemComponent } from '../message-item/message-item.component';
@@ -8,123 +8,168 @@ import { MessageItemComponent } from '../message-item/message-item.component';
   standalone: true,
   imports: [CommonModule, MessageItemComponent],
   template: `
-    <div #scrollContainer class="flex-1 overflow-y-auto overflow-x-hidden">
+    <div class="relative flex-1 overflow-hidden">
+      <div #scrollContainer
+           class="h-full overflow-y-auto overflow-x-hidden"
+           (scroll)="onScroll()">
 
-      <!-- Loading skeleton -->
-      @if (chatService.isLoading()) {
-        <div class="flex flex-col gap-6 max-w-chat mx-auto px-4 py-8">
-          @for (i of [1,2,3]; track i) {
-            <div class="flex gap-3 animate-pulse">
-              <div class="w-7 h-7 rounded-full bg-gray-200 shrink-0 mt-1"></div>
-              <div class="flex-1 space-y-2 pt-1">
-                <div class="h-3.5 bg-gray-200 rounded w-3/4"></div>
-                <div class="h-3.5 bg-gray-200 rounded w-1/2"></div>
+        <!-- ── Loading skeleton ──────────────────────────────────────────── -->
+        @if (chatService.isLoading()) {
+          <div class="flex flex-col gap-8 max-w-3xl mx-auto px-4 pt-10 pb-6">
+            @for (row of skeletonRows; track row.id) {
+              <div class="flex gap-3">
+                <div class="w-8 h-8 rounded-full skeleton shrink-0 mt-0.5"></div>
+                <div class="flex-1 space-y-2.5 pt-1">
+                  <div class="h-3 skeleton rounded-full" [style.width]="row.w1"></div>
+                  <div class="h-3 skeleton rounded-full" [style.width]="row.w2"></div>
+                  <div class="h-3 skeleton rounded-full w-2/5"></div>
+                </div>
               </div>
-            </div>
-          }
-        </div>
-      }
-
-      <!-- Empty state -->
-      @if (!chatService.isLoading() && chatService.messages().length === 0) {
-        <div class="flex flex-col items-center justify-center h-full gap-4 px-6 text-center">
-          <div class="w-12 h-12 rounded-full bg-accent/10 flex items-center justify-center">
-            <span class="text-2xl">⚖️</span>
-          </div>
-          <div>
-            <h3 class="text-lg font-semibold text-gray-800 mb-1">როგორ შემიძლია დაგეხმარო?</h3>
-            <p class="text-sm text-gray-400 max-w-xs">
-              სასამართლო გადაწყვეტილებები · კანონმდებლობა · იურიდიული რჩევები
-            </p>
-          </div>
-          <div class="grid grid-cols-2 gap-2 mt-2 w-full max-w-md">
-            @for (hint of hints; track hint) {
-              <button
-                (click)="onHint(hint)"
-                class="text-left text-xs text-gray-500 border border-gray-200 rounded-xl px-3.5 py-3
-                       hover:border-gray-300 hover:bg-gray-50 transition-colors leading-snug"
-              >{{ hint }}</button>
             }
           </div>
-        </div>
-      }
-
-      <!-- Messages -->
-      <div class="py-6">
-        @for (msg of chatService.messages(); track msg.id) {
-          <app-message-item [message]="msg" />
         }
 
-        <!-- Typing indicator -->
-        @if (chatService.isSending()) {
-          <div class="max-w-chat mx-auto px-4 py-3">
-            <div class="flex gap-3">
-              <div class="w-7 h-7 rounded-full bg-accent flex items-center justify-center shrink-0 mt-0.5">
-                <span class="text-white text-xs font-bold">AI</span>
+        <!-- ── Empty welcome state (chat open, no messages) ─────────────── -->
+        @if (!chatService.isLoading() && chatService.messages().length === 0) {
+          <div class="flex flex-col items-center justify-center h-full gap-5
+                      px-6 text-center animate-fade-in">
+
+            <div class="flex flex-col items-center gap-3">
+              <div class="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center">
+                <span class="text-2xl">⚖️</span>
               </div>
-              <div class="flex items-center gap-1 pt-2">
-                @for (d of [0,1,2]; track d) {
-                  <span
-                    class="w-2 h-2 bg-gray-400 rounded-full animate-bounce-dot"
-                    [style.animation-delay]="(d * 0.2) + 's'"
-                  ></span>
-                }
-              </div>
+              <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-100">
+                სამართლებრივი AI ასისტენტი
+              </h3>
+              <p class="text-sm text-gray-500 dark:text-gray-400 max-w-xs leading-relaxed">
+                ადმინისტრაციული სასამართლო გადაწყვეტილებები<br>
+                კანონმდებლობა · სამართლებრივი ანალიზი
+              </p>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1 w-full max-w-lg">
+              @for (hint of hints; track hint.text) {
+                <button
+                  (click)="chatService.sendMessage(hint.text)"
+                  class="prompt-card group text-left px-4 py-3.5 rounded-xl
+                         border border-gray-200 dark:border-gray-700/80
+                         bg-white dark:bg-gray-800/50
+                         hover:border-accent/40 hover:bg-accent/[0.03] dark:hover:bg-accent/[0.07]
+                         hover:shadow-sm"
+                >
+                  <div class="text-base mb-1">{{ hint.icon }}</div>
+                  <p class="text-[12px] text-gray-700 dark:text-gray-300 leading-snug">{{ hint.text }}</p>
+                </button>
+              }
+            </div>
+
+          </div>
+        }
+
+        <!-- ── Message list ───────────────────────────────────────────────── -->
+        @if (!chatService.isLoading()) {
+          <div class="pt-6 pb-2">
+            @for (msg of chatService.messages(); track msg.id; let isLast = $last) {
+              <app-message-item
+                [message]="msg"
+                [streamPhase]="isLast && msg.status === 'loading' ? chatService.streamPhase() : null"
+              />
+            }
+          </div>
+        }
+
+        <!-- ── Global error banner ───────────────────────────────────────── -->
+        @if (chatService.error()) {
+          <div class="max-w-3xl mx-auto px-4 pb-4 animate-slide-up">
+            <div class="flex items-center justify-between gap-3 px-4 py-3 rounded-xl text-sm
+                        bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800
+                        text-red-600 dark:text-red-400">
+              <span>{{ chatService.error() }}</span>
+              <button
+                (click)="chatService.clearError()"
+                class="text-red-400 hover:text-red-600 text-xl leading-none shrink-0 transition-colors"
+              >×</button>
             </div>
           </div>
         }
+
+        <div #threadEnd class="h-6"></div>
       </div>
 
-      <!-- Error bar -->
-      @if (chatService.error()) {
-        <div class="max-w-chat mx-auto px-4 pb-4">
-          <div class="flex items-center justify-between gap-3 px-4 py-3 bg-red-50
-                      border border-red-200 rounded-xl text-sm text-red-600">
-            <span>{{ chatService.error() }}</span>
-            <button (click)="chatService.clearError()"
-                    class="text-red-400 hover:text-red-600 transition-colors text-lg leading-none">×</button>
-          </div>
-        </div>
+      <!-- ── Scroll-to-bottom FAB ──────────────────────────────────────────── -->
+      @if (showScrollBtn()) {
+        <button
+          (click)="scrollDown()"
+          class="absolute bottom-4 right-4 z-10 w-9 h-9 rounded-full
+                 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700
+                 shadow-md hover:shadow-lg flex items-center justify-center
+                 text-gray-500 dark:text-gray-400 hover:text-accent dark:hover:text-accent
+                 transition-all duration-200 animate-fade-in"
+          aria-label="ბოლოში გადასვლა"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <polyline points="5 12 12 19 19 12"/>
+          </svg>
+        </button>
       }
-
-      <div #threadEnd class="h-4"></div>
     </div>
   `,
 })
 export class ChatThreadComponent {
-  @ViewChild('threadEnd') private threadEnd!: ElementRef;
-  @ViewChild('scrollContainer') private scrollContainer!: ElementRef<HTMLElement>;
+  @ViewChild('threadEnd')       private threadEnd!: ElementRef;
+  @ViewChild('scrollContainer') private scrollEl!: ElementRef<HTMLElement>;
 
-  hints = [
-    'მიპოვე გადაწყვეტილება შრომითი დავის შესახებ',
-    'რა უფლებები მაქვს სამუშაოდან გათავისუფლებისას?',
-    'ამიხსენი სახელმწიფო კომპენსაციის წესები',
-    'შეადარე ორი გადაწყვეტილება ქონებრივ დავაზე',
+  readonly hints = [
+    { icon: '🔍', text: 'მიპოვე გადაწყვეტილება შრომითი დავის შესახებ' },
+    { icon: '📋', text: 'შემიჯამე ადმინისტრაციული სამართლის პრეცედენტები' },
+    { icon: '⚖️', text: 'ამიხსენი გადასახადის გასაჩივრების პრაქტიკა' },
+    { icon: '🏛️', text: 'შეადარე ორი გადაწყვეტილება ქონებრივ დავაზე' },
   ];
 
-  private lastMessageCount = 0;
-  private shouldScroll = false;
+  readonly skeletonRows = [
+    { id: 1, w1: '70%', w2: '55%' },
+    { id: 2, w1: '50%', w2: '35%' },
+    { id: 3, w1: '65%', w2: '50%' },
+  ];
+
+  readonly showScrollBtn = signal(false);
+
+  private lastCount    = 0;
+  private userScrolled = false;
 
   constructor(public chatService: ChatService) {
-    // მხოლოდ ახალი message-ის დამატებისას ვსქროლავთ ქვემოთ
     effect(() => {
       const count = this.chatService.messages().length;
-      const sending = this.chatService.isSending();
-      if (count !== this.lastMessageCount || sending) {
-        this.lastMessageCount = count;
-        this.shouldScroll = true;
-        setTimeout(() => this.scrollToBottom());
+      this.chatService.streamTick(); // re-evaluate on every streaming token
+
+      if (count !== this.lastCount) {
+        this.lastCount    = count;
+        this.userScrolled = false;
+        this.showScrollBtn.set(false);
       }
+
+      setTimeout(() => this.scrollToBottom());
     });
   }
 
-  private scrollToBottom(): void {
-    if (!this.shouldScroll) return;
-    this.threadEnd?.nativeElement?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    this.shouldScroll = false;
+  onScroll(): void {
+    const el = this.scrollEl?.nativeElement;
+    if (!el) return;
+    const dist    = el.scrollHeight - el.scrollTop - el.clientHeight;
+    this.userScrolled = dist > 80;
+    this.showScrollBtn.set(dist > 300);
   }
 
-  onHint(text: string): void {
-    this.chatService.sendMessage(text);
+  scrollDown(): void {
+    this.userScrolled = false;
+    this.showScrollBtn.set(false);
+    this.threadEnd?.nativeElement?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }
+
+  private scrollToBottom(): void {
+    if (this.userScrolled) return;
+    this.threadEnd?.nativeElement?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }
 }

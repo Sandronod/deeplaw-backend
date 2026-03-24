@@ -2,6 +2,7 @@
 
 namespace App\Services\AI;
 
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -14,20 +15,24 @@ class QueryExtractorService
     public function __construct()
     {
         $this->apiKey  = config('openai.api_key');
-        $this->model   = config('openai.chat_model', 'gpt-4.1');
+        // Intentionally uses extraction_model (mini) — simple keyword task, gpt-4.1 is overkill
+        $this->model   = config('openai.extraction_model', 'gpt-4.1-mini');
         $this->baseUrl = config('openai.base_url', 'https://api.openai.com/v1');
     }
 
     /**
-     * ამოიღებს სამართლებრივ საძიებო ტერმინებს მომხმარებლის მესიჯიდან.
+     * Extracts clean legal search terms from user message.
      *
      * "მიპოვე და შემიჯამე სახელმწიფო კომპენსაციის შესახებ გადაწყვეტილება"
-     *   → "სახელმწიფო კომპენსაცია სახელმწიფო აკადემიური სტიპენდია"
+     *   → "სახელმწიფო კომპენსაცია"
      */
     public function extract(string $userMessage): string
     {
         try {
-            $response = Http::withToken($this->apiKey)
+            $response = Http::retry(3, 600, fn ($e) =>
+                $e instanceof RequestException && in_array($e->response?->status(), [500, 502, 503, 529])
+            )
+                ->withToken($this->apiKey)
                 ->timeout(15)
                 ->post("{$this->baseUrl}/chat/completions", [
                     'model'       => $this->model,
@@ -37,40 +42,30 @@ class QueryExtractorService
                         [
                             'role'    => 'system',
                             'content' => <<<PROMPT
-შენი ამოცანაა მომხმარებლის მოთხოვნიდან ამოიღო მხოლოდ სამართლებრივი საძიებო ტერმინები/თემები.
+ამოიღე სამართლებრივი საძიებო ტერმინები.
 
 წესები:
-- ამოიღე task instruction სიტყვები ("მიპოვე", "შემიჯამე", "განმარტე", "find", "summarize" და მსგავსი)
-- ამოიღე ზოგადი სიტყვები: "გადაწყვეტილება", "სასამართლო", "დავა"
-- დატოვე მხოლოდ კონკრეტული სამართლებრივი თემა/საგანი/ტერმინი
-- დააბრუნე მხოლოდ ამოღებული ტერმინები, სხვა არაფერი
-- თუ კონკრეტული case number ან თარიღი არის, ისიც დატოვე
-- სახელები (მოსამართლეების, მხარეების, ადვოკატების, კომპანიების) — ᲡᲐᲕᲐᲚᲓᲔᲑᲣᲚᲝᲓ შეინახე, არ ამოიღო
-- "მოსამართლე X" → შეინახე "X" (მხოლოდ სახელი)
+- ამოიღე task სიტყვები: "მიპოვე", "შემიჯამე", "განმარტე", "find", "summarize", "გთხოვ"
+- ამოიღე ზოგადი სიტყვები: "გადაწყვეტილება", "სასამართლო", "დავა", "საქმე"
+- შეინახე: სამართლებრივი თემა, ტერმინი, case number, სახელები (მოსამართლე, მხარე, კომპანია)
+- "მოსამართლე X" → შეინახე "X"
+- დააბრუნე მხოლოდ ტერმინები, კომენტარი არ დაამატო
 PROMPT,
                         ],
-                        [
-                            'role'    => 'user',
-                            'content' => $userMessage,
-                        ],
+                        ['role' => 'user', 'content' => $userMessage],
                     ],
                 ]);
 
-            if ($response->successful()) {
-                $extracted = trim($response->json('choices.0.message.content') ?? '');
-                if (!empty($extracted)) {
-                    Log::debug('QueryExtractor', [
-                        'original'  => $userMessage,
-                        'extracted' => $extracted,
-                    ]);
-                    return $extracted;
-                }
+            $extracted = trim($response->json('choices.0.message.content') ?? '');
+
+            if (!empty($extracted)) {
+                Log::debug('QueryExtractor', ['original' => $userMessage, 'extracted' => $extracted]);
+                return $extracted;
             }
         } catch (\Throwable $e) {
-            Log::warning('QueryExtractor failed, using original query: ' . $e->getMessage());
+            Log::warning('QueryExtractor failed, using original: ' . $e->getMessage());
         }
 
-        // Fallback — original query გამოიყენება
         return $userMessage;
     }
 }

@@ -7,17 +7,20 @@ use App\Http\Requests\Api\StoreChatMessageRequest;
 use App\Http\Requests\Api\StoreChatRequest;
 use App\Models\Chat;
 use App\Models\ChatMessage;
+use App\Services\AI\OpenAILegalAnswerService;
 use App\Services\Legal\LegalChatOrchestratorService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
 
 class LegalChatController extends Controller
 {
     public function __construct(
         private readonly LegalChatOrchestratorService $orchestrator,
+        private readonly OpenAILegalAnswerService     $answerer,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -90,14 +93,14 @@ class LegalChatController extends Controller
     }
 
     // -------------------------------------------------------------------------
-    // POST /api/chats/{chat}/messages
+    // POST /api/chats/{chat}/messages  (non-streaming fallback)
     // -------------------------------------------------------------------------
     public function sendMessage(StoreChatMessageRequest $request, Chat $chat): JsonResponse
     {
         try {
             $result = $this->orchestrator->handle(
-                chat:          $chat,
-                userQuestion:  $request->input('message'),
+                chat:         $chat,
+                userQuestion: $request->input('message'),
             );
 
             return response()->json([
@@ -129,6 +132,86 @@ class LegalChatController extends Controller
     }
 
     // -------------------------------------------------------------------------
+    // POST /api/chats/{chat}/messages/stream  (SSE streaming)
+    // -------------------------------------------------------------------------
+    public function streamMessage(StoreChatMessageRequest $request, Chat $chat): StreamedResponse
+    {
+        return response()->stream(function () use ($request, $chat) {
+
+            // Disable output buffering for true streaming
+            if (ob_get_level()) {
+                ob_end_clean();
+            }
+
+            $emit = function (string $event, array $data): void {
+                echo "event: {$event}\n";
+                echo 'data: ' . json_encode($data, JSON_UNESCAPED_UNICODE) . "\n\n";
+                if (ob_get_level()) ob_flush();
+                flush();
+            };
+
+            try {
+                // ── Stage 1: retrieval pipeline ───────────────────────────────
+                $emit('status', ['phase' => 'searching']);
+
+                $ctx = $this->orchestrator->prepare(
+                    chat:         $chat,
+                    userQuestion: $request->input('message'),
+                );
+
+                // ── Stage 2: stream LLM tokens ────────────────────────────────
+                $emit('status', ['phase' => 'writing']);
+
+                $fullText  = '';
+                $generator = $this->answerer->streamTokens(
+                    userQuestion:    $ctx['userQuestion'],
+                    decisions:       $ctx['finalDecisions'],
+                    historyMessages: $ctx['history'],
+                    totalFound:      $ctx['retrieval']->totalMetaFound,
+                    mode:            $ctx['mode'],
+                    confidence:      $ctx['confidence'],
+                );
+
+                foreach ($generator as $token) {
+                    $fullText .= $token;
+                    $emit('token', ['token' => $token]);
+                }
+
+                // ── Stage 3: persist & emit final payload ─────────────────────
+                $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText);
+
+                $emit('done', [
+                    'message_id' => $assistantMessage->id,
+                    'citations'  => $assistantMessage->meta['citations']      ?? [],
+                    'meta'       => [
+                        'retrieval_mode'   => $assistantMessage->meta['retrieval_mode']   ?? null,
+                        'answer_mode'      => $assistantMessage->meta['answer_mode']      ?? null,
+                        'confidence'       => $assistantMessage->meta['confidence']       ?? null,
+                        'confidence_note'  => $assistantMessage->meta['confidence_note']  ?? null,
+                        'used_case_count'  => $assistantMessage->meta['used_case_count']  ?? 0,
+                        'used_chunk_count' => $assistantMessage->meta['used_chunk_count'] ?? 0,
+                        'pipeline_ms'      => $assistantMessage->meta['pipeline_ms']      ?? null,
+                    ],
+                ]);
+
+            } catch (Throwable $e) {
+                Log::error('LegalChat stream error', [
+                    'chat_id' => $chat->id,
+                    'error'   => $e->getMessage(),
+                ]);
+
+                $emit('error', ['message' => 'შეტყობინების გენერირება ვერ მოხერხდა.']);
+            }
+
+        }, 200, [
+            'Content-Type'      => 'text/event-stream',
+            'Cache-Control'     => 'no-cache, no-store',
+            'X-Accel-Buffering' => 'no',
+            'Connection'        => 'keep-alive',
+        ]);
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
     private function formatMessage(ChatMessage $message): array
@@ -140,9 +223,13 @@ class LegalChatController extends Controller
             'content'    => $message->content,
             'citations'  => $message->meta['citations'] ?? [],
             'meta'       => [
-                'retrieval_mode'    => $message->meta['retrieval_mode'] ?? null,
-                'used_case_count'   => $message->meta['used_case_count'] ?? 0,
-                'used_chunk_count'  => $message->meta['used_chunk_count'] ?? 0,
+                'retrieval_mode'   => $message->meta['retrieval_mode']   ?? null,
+                'answer_mode'      => $message->meta['answer_mode']      ?? null,
+                'confidence'       => $message->meta['confidence']       ?? null,
+                'confidence_note'  => $message->meta['confidence_note']  ?? null,
+                'used_case_count'  => $message->meta['used_case_count']  ?? 0,
+                'used_chunk_count' => $message->meta['used_chunk_count'] ?? 0,
+                'pipeline_ms'      => $message->meta['pipeline_ms']      ?? null,
             ],
             'created_at' => $message->created_at?->toISOString(),
         ];

@@ -2,181 +2,307 @@
 
 namespace App\Services\Legal;
 
+use App\DTOs\ParsedQuery;
+use App\DTOs\RetrievalResult;
 use App\Models\LegalCase;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 
 class LegalCaseRetrieverService
 {
     /**
      * Full retrieval pipeline.
      *
-     * Returns array of reconstructed decisions with metadata.
-     *
-     * @param  array  $embedding   Float array from OpenAI
-     * @return array{
-     *   decisions: array,
-     *   matched_case_ids: array,
-     *   matched_case_numbers: array,
-     *   relevance_scores: array,
-     *   used_chunk_count: int,
-     *   used_case_count: int,
-     * }
+     * @param  array       $rawEmbedding   Float array — raw query embedding (always required)
+     * @param  string      $searchTerms    Extracted clean terms → metadata ILIKE
+     * @param  string      $originalQuery  Full user question → case_num/year extraction fallback
+     * @param  array|null  $hydeEmbedding  HyDE embedding for dual search (optional)
+     * @param  ParsedQuery|null $parsed    Structured filters from QueryParserService (optional)
      */
-    public function retrieve(array $embedding, string $rawQuery = ''): array
-    {
+    public function retrieve(
+        array       $rawEmbedding,
+        string      $searchTerms  = '',
+        string      $originalQuery = '',
+        ?array      $hydeEmbedding = null,
+        ?ParsedQuery $parsed       = null,
+    ): RetrievalResult {
         $chunkLimit = config('openai.retrieval_chunk_limit', 20);
         $caseLimit  = config('openai.retrieval_case_limit', 3);
         $baseScore  = config('openai.retrieval_min_score', 0.65);
 
-        // ── 1. Vector search (tiered threshold) ──────────────────────────────
-        $thresholds    = [$baseScore, 0.50, 0.40];
-        $vectorChunks  = collect();
+        // ── 0a. Resolve year filter ───────────────────────────────────────────
+        $year = $parsed?->effectiveYear();
+        if ($year === null && preg_match('/\b(19|20)\d{2}\b/', $originalQuery, $m)) {
+            $y = (int) $m[0];
+            if ($y >= 1990 && $y <= (int) date('Y')) {
+                $year = $y;
+            }
+        }
+
+        // ── 0b. Case number direct lookup ─────────────────────────────────────
+        $caseNumChunks = collect();
+        $caseNumPattern = $parsed?->caseNumber;
+        if ($caseNumPattern === null) {
+            preg_match('/[ა-ჰA-Z]{1,4}[-\/]\d+(?:\([^)]+\))?/u', $originalQuery, $cn);
+            $caseNumPattern = $cn[0] ?? null;
+        }
+        if ($caseNumPattern !== null) {
+            $caseNumChunks = LegalCase::metadataSearch($caseNumPattern, 5, null);
+            Log::debug('Retriever: case number lookup', [
+                'pattern' => $caseNumPattern,
+                'found'   => $caseNumChunks->count(),
+            ]);
+        }
+
+        // ── 1. Vector search — raw embedding ─────────────────────────────────
+        $thresholds = [$baseScore, 0.50, 0.40];
+        $rawChunks  = collect();
 
         foreach ($thresholds as $minScore) {
-            $vectorChunks = LegalCase::vectorSearch($embedding, $chunkLimit, $minScore);
-            if ($vectorChunks->isNotEmpty()) {
+            $rawChunks = LegalCase::vectorSearch($rawEmbedding, $chunkLimit, $minScore, $year);
+            if ($rawChunks->isNotEmpty()) {
+                Log::debug('Retriever: raw vector search', [
+                    'threshold' => $minScore,
+                    'found'     => $rawChunks->count(),
+                ]);
                 break;
             }
         }
 
-        // ── 2. Metadata search — case_num, court, chamber, category… ─────────
-        $metaChunks = collect();
-        if (!empty($rawQuery)) {
-            $metaChunks = LegalCase::metadataSearch($rawQuery, 30);
+        // ── 2. Vector search — HyDE embedding (if provided) ──────────────────
+        $hydeChunks = collect();
+        if ($hydeEmbedding !== null) {
+            foreach ($thresholds as $minScore) {
+                $hydeChunks = LegalCase::vectorSearch($hydeEmbedding, $chunkLimit, $minScore, $year);
+                if ($hydeChunks->isNotEmpty()) {
+                    Log::debug('Retriever: HyDE vector search', [
+                        'threshold' => $minScore,
+                        'found'     => $hydeChunks->count(),
+                    ]);
+                    break;
+                }
+            }
         }
 
-        // ── 3. Merge: metadata case_ids ემატება vector შედეგებს ──────────────
-        $matchedChunks = $vectorChunks;
+        // ── 3. Merge raw + HyDE by chunk id, keep max similarity ─────────────
+        $vectorChunks = $this->mergeChunkResults($rawChunks, $hydeChunks);
+
+        // ── 4. Metadata search — uses searchTerms or judge filter ─────────────
+        $metaChunks  = collect();
+        $metaTerms   = $parsed?->judge ?? $searchTerms;
+        if (!empty($metaTerms)) {
+            $metaChunks = LegalCase::metadataSearch($metaTerms, 30, $year);
+            Log::debug('Retriever: metadata search', [
+                'terms' => $metaTerms,
+                'found' => $metaChunks->count(),
+            ]);
+        }
+
+        // ── 5. Three-way merge: case_num (1.0) > vector > metadata (0.60) ────
+        $matchedChunks   = $vectorChunks;
+        $existingCaseIds = $vectorChunks->pluck('case_id')->unique()->toArray();
+
+        if ($caseNumChunks->isNotEmpty()) {
+            $newCnIds = array_diff(
+                $caseNumChunks->pluck('case_id')->unique()->toArray(),
+                $existingCaseIds
+            );
+            if (!empty($newCnIds)) {
+                $extra = $caseNumChunks->whereIn('case_id', $newCnIds)->map(function ($c) {
+                    $c->similarity = 1.0;
+                    return $c;
+                });
+                $matchedChunks   = $matchedChunks->concat($extra);
+                $existingCaseIds = array_merge($existingCaseIds, $newCnIds);
+            }
+        }
 
         if ($metaChunks->isNotEmpty()) {
-            $metaCaseIds    = $metaChunks->pluck('case_id')->unique()->toArray();
-            $vectorCaseIds  = $vectorChunks->pluck('case_id')->unique()->toArray();
-            $newCaseIds     = array_diff($metaCaseIds, $vectorCaseIds);
-
-            if (!empty($newCaseIds)) {
-                // metadata-ით ნაპოვნი case_ids-ის chunks-ებს ვამატებთ
-                // similarity=0.60 dummy score-ით (metadata match-ისთვის)
-                $extraChunks = $metaChunks
-                    ->whereIn('case_id', $newCaseIds)
-                    ->map(function ($c) {
-                        $c->similarity = 0.60;
-                        return $c;
-                    });
-                $matchedChunks = $vectorChunks->concat($extraChunks);
+            $newMetaIds = array_diff(
+                $metaChunks->pluck('case_id')->unique()->toArray(),
+                $existingCaseIds
+            );
+            if (!empty($newMetaIds)) {
+                $extra = $metaChunks->whereIn('case_id', $newMetaIds)->map(function ($c) {
+                    $c->similarity = 0.60;
+                    return $c;
+                });
+                $matchedChunks = $matchedChunks->concat($extra);
             }
         }
 
         if ($matchedChunks->isEmpty()) {
-            return $this->emptyResult();
+            Log::debug('Retriever: no results found');
+            return RetrievalResult::empty();
         }
 
-        // ── Dynamic case limit ──────────────────────────────────────────────
-        // მოსამართლის/მხარის სახელზე ძებნა: vector ვერ პოულობს, meta პოულობს.
-        // ასეთ შემთხვევაში მეტ case-ს ვაბრუნებთ (max 10 vs ჩვეული 3).
-        // meta-ით ნაპოვნი unique case-ების რაოდენობა config caseLimit-ს აჭარბებს?
-        // → limit-ს ვაფართოვებთ (სახელი/ობიექტი ძებნა vs. თემური ძებნა)
+        // ── 6. Dynamic case limit (more metadata matches → expand limit) ──────
         $metaUniqueCases = $metaChunks->pluck('case_id')->unique()->count();
         if ($metaUniqueCases > $caseLimit) {
             $caseLimit = min(30, $metaUniqueCases);
         }
 
-        // Step 2: Group by case_id — compute aggregate relevance score
-        $caseScores = $this->computeCaseScores($matchedChunks);
+        // ── 7. Score + select top N cases (expanded for reranker) ─────────────
+        // Retrieve up to 3× the default limit so the reranker has room to work
+        $retrievalLimit = min(30, $caseLimit * 3);
+        $caseScores     = $this->computeCaseScores($matchedChunks);
 
-        // Step 3: Pick top N parent decisions by aggregate score
         $topCaseIds = $caseScores
             ->sortByDesc('score')
-            ->take($caseLimit)
+            ->take($retrievalLimit)
             ->pluck('case_id')
             ->toArray();
 
-        // Step 4: Fetch ALL chunks for those case_ids, ordered correctly
+        // ── 8. Reconstruct decisions ──────────────────────────────────────────
         $allChunks = LegalCase::chunksForCases($topCaseIds);
 
-        // Step 5: Reconstruct decisions — matched chunks first, then rest
-        // matched chunks-ს ინახავს case_id → [chunk_content, ...] სახით
         $matchedChunksByCase = $matchedChunks
             ->whereIn('case_id', $topCaseIds)
             ->groupBy('case_id')
-            ->map(fn ($g) => $g->pluck('content')->filter()->values()->toArray());
+            ->map(fn($g) => $g->pluck('content')->filter()->unique()->values()->toArray());
 
-        $decisions = $this->reconstructDecisions($allChunks, $caseScores, $topCaseIds, $matchedChunksByCase);
+        [$decisions, $qualityFlags] = $this->reconstructDecisions(
+            $allChunks,
+            $caseScores,
+            $topCaseIds,
+            $matchedChunksByCase,
+        );
 
-        // Step 6: Build return metadata
         $matchedCaseNumbers = collect($decisions)->pluck('case_num')->filter()->unique()->values()->toArray();
-        $relevanceScores    = $caseScores->whereIn('case_id', $topCaseIds)
-            ->pluck('score', 'case_id')->toArray();
+        $relevanceScores    = $caseScores
+            ->whereIn('case_id', $topCaseIds)
+            ->pluck('score', 'case_id')
+            ->toArray();
 
-        return [
-            'decisions'            => $decisions,
-            'matched_case_ids'     => $topCaseIds,
-            'matched_case_numbers' => $matchedCaseNumbers,
-            'relevance_scores'     => $relevanceScores,
-            'used_chunk_count'     => $allChunks->count(),
-            'used_case_count'      => count($topCaseIds),
-            'total_meta_found'     => $metaUniqueCases, // სულ რამდენი case იპოვა meta search-ით
-        ];
+        Log::debug('Retriever: complete', [
+            'candidates'  => count($topCaseIds),
+            'chunks'      => $allChunks->count(),
+            'hyde_used'   => $hydeEmbedding !== null,
+            'dual_chunks' => $hydeChunks->count(),
+        ]);
+
+        return new RetrievalResult(
+            decisions:          $decisions,
+            matchedCaseIds:     $topCaseIds,
+            matchedCaseNumbers: $matchedCaseNumbers,
+            relevanceScores:    $relevanceScores,
+            usedChunkCount:     $allChunks->count(),
+            usedCaseCount:      count($topCaseIds),
+            totalMetaFound:     $metaUniqueCases,
+        );
     }
 
+    public function emptyRetrieval(): RetrievalResult
+    {
+        return RetrievalResult::empty();
+    }
+
+    // ── Private: merge ────────────────────────────────────────────────────────
+
     /**
-     * Groups chunks by case_id and computes a weighted relevance score per case.
-     * Score = 0.7 * max_similarity + 0.3 * avg_similarity
+     * Merges two chunk collections by chunk row id, keeping max similarity.
+     * This handles the dual-embedding case: same physical chunk may appear in
+     * both raw and HyDE results with different similarity scores.
      */
+    private function mergeChunkResults(Collection $primary, Collection $secondary): Collection
+    {
+        if ($secondary->isEmpty()) {
+            return $primary;
+        }
+        if ($primary->isEmpty()) {
+            return $secondary;
+        }
+
+        // Index primary by row id
+        $merged = $primary->keyBy('id');
+
+        foreach ($secondary as $chunk) {
+            $existing = $merged->get($chunk->id);
+            if ($existing === null) {
+                $merged->put($chunk->id, $chunk);
+            } elseif ((float) $chunk->similarity > (float) $existing->similarity) {
+                // Keep higher similarity from either embedding
+                $merged->put($chunk->id, $chunk);
+            }
+        }
+
+        return $merged->values();
+    }
+
+    // ── Private: scoring ──────────────────────────────────────────────────────
+
     private function computeCaseScores(Collection $chunks): Collection
     {
         return $chunks
             ->groupBy('case_id')
             ->map(function (Collection $group, int $caseId) {
-                $similarities  = $group->pluck('similarity');
-                $maxSimilarity = $similarities->max();
-                $avgSimilarity = $similarities->avg();
-
+                $similarities = $group->pluck('similarity')->map('floatval');
                 return [
-                    'case_id'       => $caseId,
-                    'score'         => 0.7 * $maxSimilarity + 0.3 * $avgSimilarity,
-                    'max_sim'       => $maxSimilarity,
-                    'avg_sim'       => $avgSimilarity,
+                    'case_id'        => $caseId,
+                    'score'          => 0.7 * $similarities->max() + 0.3 * $similarities->avg(),
+                    'max_sim'        => $similarities->max(),
+                    'avg_sim'        => $similarities->avg(),
                     'matched_chunks' => $group->count(),
                 ];
             })
             ->values();
     }
 
+    // ── Private: reconstruction ───────────────────────────────────────────────
+
     /**
-     * Reconstructs decisions.
-     * - full_text  : სრული გადაწყვეტილება (ყველა chunk, სწორი თანმიმდევრობა)
-     * - excerpt    : მხოლოდ matched chunks — OpenAI-სთვის პირველ რიგში გამოიყენება
+     * Reconstructs decision arrays from raw chunks.
+     *
+     * Improvements over previous version:
+     *  - Deduplicates chunks by content hash (prevents repeated content)
+     *  - Detects chunk sequence gaps (missing chunks in decision)
+     *  - Tracks per-decision quality flags
+     *
+     * @return array{0: array[], 1: array<int, string[]>} [$decisions, $qualityFlagsByCaseId]
      */
     private function reconstructDecisions(
         Collection $allChunks,
         Collection $caseScores,
         array      $orderedCaseIds,
-        Collection $matchedChunksByCase = null,
+        Collection $matchedChunksByCase,
     ): array {
         $scoresByCaseId = $caseScores->keyBy('case_id');
         $chunksByCaseId = $allChunks->groupBy('case_id');
-
-        $decisions = [];
+        $decisions      = [];
+        $qualityFlags   = [];
 
         foreach ($orderedCaseIds as $caseId) {
             $chunks = $chunksByCaseId->get($caseId, collect());
-
             if ($chunks->isEmpty()) {
                 continue;
             }
 
-            $first = $chunks->first();
+            // Deduplicate by content hash
+            $seen        = [];
+            $uniqueChunks = $chunks->filter(function ($c) use (&$seen) {
+                $hash = md5($c->content ?? '');
+                if (isset($seen[$hash])) {
+                    return false;
+                }
+                $seen[$hash] = true;
+                return true;
+            });
 
-            // სრული ტექსტი — ყველა chunk სწორი თანმიმდევრობა
-            $fullText = $chunks
-                ->map(fn ($c) => $c->content ?? '')
+            // Detect sequence gaps using chunk_index from meta
+            $flags = $this->detectQualityFlags($uniqueChunks);
+            $qualityFlags[$caseId] = $flags;
+
+            $first    = $uniqueChunks->first();
+            $fullText = $uniqueChunks
+                ->map(fn($c) => trim($c->content ?? ''))
                 ->filter()
                 ->implode("\n\n");
 
-            // Excerpt — matched chunks (query-ს ყველაზე releval ნაწილი)
-            $matchedContents = $matchedChunksByCase?->get($caseId, []) ?? [];
-            $excerpt = !empty($matchedContents)
-                ? implode("\n\n", $matchedContents)
+            // Excerpt: deduplicated matched chunk contents
+            $rawMatched = $matchedChunksByCase->get($caseId, []);
+            $rawMatched = array_unique($rawMatched);
+            $excerpt    = !empty($rawMatched)
+                ? implode("\n\n", $rawMatched)
                 : mb_substr($fullText, 0, 4000);
 
             $score = $scoresByCaseId->get($caseId);
@@ -192,32 +318,53 @@ class LegalCaseRetrieverService
                 'kind'            => $first->kind,
                 'chamber'         => $first->chamber,
                 'court'           => $first->court,
-                'section'         => $first->section,
                 'full_text'       => $fullText,
-                'excerpt'         => $excerpt,         // matched chunks only
-                'chunk_count'     => $chunks->count(),
+                'excerpt'         => $excerpt,
+                'chunk_count'     => $uniqueChunks->count(),
+                'quality_flags'   => $flags,
                 'relevance_score' => $score ? round($score['score'], 4) : null,
             ];
         }
 
-        return $decisions;
+        return [$decisions, $qualityFlags];
     }
 
-    public function emptyRetrieval(): array
+    /**
+     * Detects quality issues in the chunk sequence for a decision.
+     * Returns array of flag strings (empty = clean).
+     */
+    private function detectQualityFlags(Collection $chunks): array
     {
-        return $this->emptyResult();
-    }
+        $flags = [];
 
-    private function emptyResult(): array
-    {
-        return [
-            'decisions'            => [],
-            'matched_case_ids'     => [],
-            'matched_case_numbers' => [],
-            'relevance_scores'     => [],
-            'used_chunk_count'     => 0,
-            'used_case_count'      => 0,
-            'total_meta_found'     => 0,
-        ];
+        // Extract chunk indices from meta
+        $indices = $chunks
+            ->map(fn($c) => isset($c->meta['chunk_index'])
+                ? (int) $c->meta['chunk_index']
+                : null)
+            ->filter(fn($v) => $v !== null)
+            ->sort()
+            ->values();
+
+        if ($indices->isEmpty()) {
+            return $flags; // No index metadata — can't assess
+        }
+
+        $min      = $indices->first();
+        $max      = $indices->last();
+        $expected = range($min, $max);
+        $actual   = $indices->toArray();
+        $missing  = array_diff($expected, $actual);
+
+        if (!empty($missing)) {
+            $flags[] = 'missing_chunks:' . implode(',', array_values($missing));
+        }
+
+        // Flag if we only got a partial view (starts after chunk 0)
+        if ($min > 0) {
+            $flags[] = 'starts_at_chunk:' . $min;
+        }
+
+        return $flags;
     }
 }

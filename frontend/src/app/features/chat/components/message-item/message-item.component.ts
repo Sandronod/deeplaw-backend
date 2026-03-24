@@ -1,83 +1,167 @@
-import { Component, Input } from '@angular/core';
+import { Component, Input, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ChatMessage } from '../../../../core/models/message.model';
+import { MarkdownService } from '../../../../core/services/markdown.service';
 import { CitationListComponent } from '../citation-list/citation-list.component';
+import { ConfidenceBadgeComponent } from '../confidence-badge/confidence-badge.component';
+import { MessageActionsComponent } from '../message-actions/message-actions.component';
 
 @Component({
   selector: 'app-message-item',
   standalone: true,
-  imports: [CommonModule, CitationListComponent],
+  imports: [CommonModule, CitationListComponent, ConfidenceBadgeComponent, MessageActionsComponent],
   template: `
-    <!-- USER message -->
+
+    <!-- ── USER message ────────────────────────────────────────────────────── -->
     @if (isUser) {
-      <div class="max-w-chat mx-auto px-4 py-2">
+      <div class="max-w-3xl mx-auto px-4 py-2" [class.msg-enter]="message.isNew">
         <div class="flex justify-end">
-          <div class="max-w-[85%] sm:max-w-[75%]">
-            <div class="bg-user-msg text-gray-800 rounded-2xl rounded-br-sm
-                        px-4 py-3 text-[15px] leading-relaxed break-words"
-                 [innerHTML]="formatted">
+          <div class="max-w-[75%] sm:max-w-[65%]">
+            <div class="chat-text bg-gray-100 dark:bg-[#2d2d2d] text-gray-800 dark:text-gray-100
+                        rounded-2xl rounded-br-sm px-4 py-3 leading-relaxed
+                        whitespace-pre-wrap break-words shadow-sm">
+              {{ message.content }}
             </div>
           </div>
         </div>
       </div>
     }
 
-    <!-- ASSISTANT message -->
+    <!-- ── ASSISTANT message ───────────────────────────────────────────────── -->
     @if (isAssistant) {
-      <div class="max-w-chat mx-auto px-4 py-3">
+      <div class="max-w-3xl mx-auto px-4 py-4 msg-wrapper" [class.msg-enter]="message.isNew">
         <div class="flex gap-3 items-start">
 
           <!-- Avatar -->
-          <div class="w-7 h-7 rounded-full bg-accent flex items-center justify-center
-                      shrink-0 mt-0.5 shadow-sm">
+          <div class="w-8 h-8 rounded-full bg-accent flex items-center justify-center
+                      shrink-0 mt-0.5 shadow-sm shadow-accent/20">
             <span class="text-white text-[10px] font-bold tracking-tight">AI</span>
           </div>
 
           <!-- Content -->
-          <div class="flex-1 min-w-0 space-y-3">
-            <div class="text-[15px] text-gray-800 leading-relaxed break-words prose-sm max-w-none"
-                 [innerHTML]="formatted">
-            </div>
+          <div class="flex-1 min-w-0 pt-0.5">
 
-            <!-- Citations -->
-            @if (hasCitations) {
-              <app-citation-list [citations]="message.citations" />
-            }
-
-            <!-- Retrieval badge -->
-            @if ((message.meta?.used_case_count ?? 0) > 0) {
-              <div class="flex items-center gap-1.5 text-[11px] text-gray-400">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="2">
-                  <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-                </svg>
-                {{ message.meta?.used_case_count ?? 0 }} გადაწყვეტილება ·
-                {{ message.meta?.used_chunk_count ?? 0 }} ფრაგმენტი
+            <!-- ── Loading phase label ────────────────────────────────────── -->
+            @if (isLoading) {
+              <div class="flex items-center gap-2 py-1">
+                <span class="flex gap-1">
+                  @for (d of [0, 1, 2]; track d) {
+                    <span
+                      class="w-1.5 h-1.5 rounded-full bg-gray-300 dark:bg-gray-600 animate-bounce-dot"
+                      [style.animation-delay]="(d * 0.2) + 's'"
+                    ></span>
+                  }
+                </span>
+                <span class="text-xs text-gray-400 dark:text-gray-500 animate-fade-in">
+                  {{ phaseLabel }}
+                </span>
               </div>
             }
+
+            <!-- ── Content (streaming or done) ───────────────────────────── -->
+            @if (hasContent) {
+              <div
+                class="md-content chat-text text-gray-800 dark:text-gray-100 break-words"
+                [innerHTML]="renderedContent"
+              ></div>
+
+              @if (isStreaming) {
+                <span class="streaming-cursor"></span>
+              }
+            }
+
+            <!-- ── Error notice ────────────────────────────────────────────── -->
+            @if (isError) {
+              <div class="mt-2 flex items-center gap-2 text-xs text-red-500 dark:text-red-400 animate-fade-in">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="12" y1="8"  x2="12"    y2="12"/>
+                  <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                @if (message.isPartial) {
+                  <span>პასუხი ნაწილობრივ გენერირდა — კავშირი გაწყდა.</span>
+                } @else {
+                  <span>შეცდომა — სცადეთ თავიდან.</span>
+                }
+              </div>
+            }
+
+            <!-- ── Meta row: confidence + actions (done state only) ───────── -->
+            @if (isDone && hasContent) {
+              <div class="flex items-center justify-between mt-2.5 gap-2 flex-wrap">
+                <div>
+                  @if (confidence) {
+                    <app-confidence-badge
+                      [level]="confidence"
+                      [explanation]="confidenceNote"
+                    />
+                  }
+                </div>
+
+                <app-message-actions
+                  [text]="message.content"
+                  [citationCount]="citationCount"
+                  [citationsOpen]="citationsVisible()"
+                  (citationsToggle)="toggleCitations()"
+                />
+              </div>
+            }
+
+            <!-- ── Citations ───────────────────────────────────────────────── -->
+            @if (citationsVisible() && citationCount > 0) {
+              <div class="animate-slide-up">
+                <app-citation-list [citations]="message.citations" />
+              </div>
+            }
+
           </div>
         </div>
       </div>
     }
+
   `,
 })
 export class MessageItemComponent {
   @Input({ required: true }) message!: ChatMessage;
+  /** Passed from chat-thread only for the currently-loading message. */
+  @Input() streamPhase: string | null = null;
 
-  get isUser(): boolean { return this.message.role === 'user'; }
+  citationsVisible = signal(false);
+
+  // Markdown memoization — avoids re-parsing on every CD tick during streaming
+  private _cachedContent  = '';
+  private _cachedRendered = '';
+
+  constructor(private md: MarkdownService) {}
+
+  get isUser():      boolean { return this.message.role === 'user'; }
   get isAssistant(): boolean { return this.message.role === 'assistant'; }
-  get hasCitations(): boolean { return (this.message.citations?.length ?? 0) > 0; }
 
-  get formatted(): string {
-    return this.message.content
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,
-        '<a href="$2" target="_blank" rel="noopener" ' +
-        'class="text-accent underline underline-offset-2 hover:text-accent-hover">$1</a>')
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/\n\n/g, '</p><p class="mt-3">')
-      .replace(/\n/g, '<br>');
+  get isLoading():   boolean { return this.message.status === 'loading'; }
+  get isStreaming(): boolean { return this.message.status === 'streaming'; }
+  get isDone():      boolean { return this.message.status === 'done' || this.message.status === undefined; }
+  get isError():     boolean { return this.message.status === 'error'; }
+
+  get hasContent():  boolean { return this.message.content.trim().length > 0; }
+
+  get phaseLabel(): string {
+    return this.streamPhase === 'writing'
+      ? 'ვამზადებ პასუხს…'
+      : 'ვიძებ გადაწყვეტილებებს…';
+  }
+
+  get confidence()     { return this.message.meta?.confidence      ?? null; }
+  get confidenceNote() { return this.message.meta?.confidence_note ?? null; }
+  get citationCount(): number { return this.message.citations?.length ?? 0; }
+
+  toggleCitations(): void { this.citationsVisible.update(v => !v); }
+
+  get renderedContent(): string {
+    if (this.message.content !== this._cachedContent) {
+      this._cachedContent  = this.message.content;
+      this._cachedRendered = this.md.parse(this.message.content);
+    }
+    return this._cachedRendered;
   }
 }

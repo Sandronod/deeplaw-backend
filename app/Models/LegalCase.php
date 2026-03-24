@@ -24,7 +24,6 @@ class LegalCase extends Model
         'kind',
         'chamber',
         'court',
-        'section',
         'content',
         'embedding',
         'meta',
@@ -45,18 +44,21 @@ class LegalCase extends Model
      * @param  int    $limit
      * @param  float  $minScore   Cosine similarity threshold (0–1)
      */
-    public static function vectorSearch(array $embedding, int $limit = 20, float $minScore = 0.65): \Illuminate\Support\Collection
+    public static function vectorSearch(array $embedding, int $limit = 20, float $minScore = 0.65, ?int $year = null): \Illuminate\Support\Collection
     {
         $vector = self::formatVector($embedding);
+
+        $yearFilter = $year ? "AND EXTRACT(YEAR FROM case_date) = {$year}" : '';
 
         $sql = <<<SQL
             SELECT
                 id, case_id, case_num, dispute_subject, case_date,
                 category, result, claim_type, kind, chamber,
-                court, section, content, meta,
+                court, content, meta,
                 1 - (embedding <=> '{$vector}'::vector) AS similarity
             FROM cases
             WHERE 1 - (embedding <=> '{$vector}'::vector) >= ?
+            {$yearFilter}
             ORDER BY embedding <=> '{$vector}'::vector
             LIMIT ?
         SQL;
@@ -72,17 +74,20 @@ class LegalCase extends Model
      * ეს კრიტიკულია: სახელის ძებნისას content-ში ბევრი chunk შეიძლება match-ოს,
      * მაგრამ ჩვენ case-ები გვინდა, არა ცალკეული chunk-ები.
      */
-    public static function metadataSearch(string $query, int $limit = 30): \Illuminate\Support\Collection
+    public static function metadataSearch(string $query, int $limit = 30, ?int $year = null): \Illuminate\Support\Collection
     {
         $term = '%' . trim($query) . '%';
+
+        $yearFilter = $year ? "AND EXTRACT(YEAR FROM case_date) = {$year}" : '';
 
         $sql = <<<SQL
             SELECT DISTINCT ON (case_id)
                 id, case_id, case_num, dispute_subject, case_date,
                 category, result, claim_type, kind, chamber,
-                court, section, content, meta
+                court, content, meta
             FROM cases
-            WHERE case_num        ILIKE ?
+            WHERE (
+                case_num        ILIKE ?
                OR dispute_subject ILIKE ?
                OR category        ILIKE ?
                OR result          ILIKE ?
@@ -91,6 +96,8 @@ class LegalCase extends Model
                OR chamber         ILIKE ?
                OR court           ILIKE ?
                OR content         ILIKE ?
+            )
+            {$yearFilter}
             ORDER BY case_id, id
             LIMIT ?
         SQL;
@@ -117,7 +124,7 @@ class LegalCase extends Model
             ")
             ->get(['id', 'case_id', 'case_num', 'dispute_subject', 'case_date',
                    'category', 'result', 'claim_type', 'kind', 'chamber',
-                   'court', 'section', 'content', 'meta']);
+                   'court', 'content', 'meta']);
     }
 
     /**

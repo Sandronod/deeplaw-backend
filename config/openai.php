@@ -7,8 +7,10 @@ return [
     'embedding_model'   => env('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-large'),
     'embedding_dimensions' => (int) env('OPENAI_EMBEDDING_DIMENSIONS', 3072),
     'chat_model'        => env('OPENAI_CHAT_MODEL', 'gpt-4.1'),
+    // Lightweight model for keyword extraction (10x cheaper than chat_model)
+    'extraction_model'  => env('OPENAI_EXTRACTION_MODEL', 'gpt-4.1-mini'),
     'timeout'           => (int) env('OPENAI_TIMEOUT', 60),
-    'max_tokens'        => (int) env('OPENAI_MAX_TOKENS', 2048),
+    'max_tokens'        => (int) env('OPENAI_MAX_TOKENS', 4096),
     'temperature'       => (float) env('OPENAI_TEMPERATURE', 0.2),
 
     // Text sent to OpenAI per decision (chars). gpt-4.1 = 1M tokens, ასე რომ 40k char კარგია

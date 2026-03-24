@@ -1,11 +1,194 @@
-/* Custom overrides — Tailwind utilities come from tailwind.css */
+/* Custom overrides — Tailwind utilities come from tailwind-out.css */
 
 html, body { height: 100%; font-size: 16px; }
 
+/* Chat text size — controlled by SettingsService */
+.chat-text { font-size: var(--chat-font-size, 16px); line-height: 1.7; }
+
+/* ── Scrollbars ─────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 9999px; }
 ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
 
+.dark ::-webkit-scrollbar-thumb { background: #374151; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
 .scrollbar-sidebar::-webkit-scrollbar-thumb { background: #3a3a3a; }
-.scrollbar-sidebar::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
+.scrollbar-sidebar::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* ── Mobile sidebar ──────────────────────────────────────────────────────── */
+.sidebar-wrapper {
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  z-index: 50;
+  transform: translateX(-100%);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform;
+}
+.sidebar-wrapper.is-open {
+  transform: translateX(0);
+}
+@media (min-width: 1024px) {
+  .sidebar-wrapper {
+    position: relative;
+    transform: none !important;
+    transition: none;
+    z-index: auto;
+  }
+}
+
+/* ── Skeleton shimmer ─────────────────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    #f0f0f0 25%,
+    #e8e8e8 50%,
+    #f0f0f0 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+.dark .skeleton {
+  background: linear-gradient(
+    90deg,
+    #374151 25%,
+    #2d3748 50%,
+    #374151 75%
+  );
+  background-size: 200% 100%;
+}
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+
+/* ── Message entrance animation ──────────────────────────────────────────── */
+.msg-enter {
+  animation: fadeSlide 0.22s ease-out both;
+}
+@keyframes fadeSlide {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* ── Markdown Prose ─────────────────────────────────────────────────────── */
+.md-content {
+  font-size: var(--chat-font-size, 15px);
+  line-height: 1.75;
+  color: inherit;
+
+  .md-p {
+    margin-top: 0;
+    margin-bottom: 0.85em;
+    &:last-child { margin-bottom: 0; }
+  }
+
+  .md-h1 { font-size: 1.35em; font-weight: 700; margin: 1.1em 0 0.4em;  color: inherit; }
+  .md-h2 { font-size: 1.2em;  font-weight: 700; margin: 1em 0 0.35em;   color: inherit; }
+  .md-h3 { font-size: 1.05em; font-weight: 600; margin: 0.9em 0 0.3em;  color: inherit; }
+  .md-h4 { font-size: 1em;    font-weight: 600; margin: 0.8em 0 0.25em; color: inherit; }
+
+  .md-hr {
+    border: none;
+    border-top: 1px solid #e5e7eb;
+    margin: 1.25em 0;
+    .dark & { border-top-color: #374151; }
+  }
+
+  .md-ul, .md-ol {
+    padding-left: 1.4em;
+    margin: 0.5em 0 0.85em;
+    li {
+      margin-bottom: 0.25em;
+      &::marker { color: #10a37f; }
+    }
+  }
+  .md-ul { list-style: disc; }
+  .md-ol { list-style: decimal; }
+
+  .md-blockquote {
+    border-left: 3px solid #10a37f;
+    padding: 0.4em 0.8em;
+    margin: 0.75em 0;
+    color: #6b7280;
+    background: #f9fafb;
+    border-radius: 0 6px 6px 0;
+    font-style: italic;
+    .dark & { background: #1f2937; color: #9ca3af; }
+  }
+
+  .md-pre {
+    background: #1e1e2e;
+    border-radius: 8px;
+    padding: 1em 1.1em;
+    overflow-x: auto;
+    margin: 0.75em 0;
+
+    code {
+      font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.85em;
+      color: #cdd6f4;
+      white-space: pre;
+    }
+  }
+
+  .md-code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.85em;
+    background: #f3f4f6;
+    color: #e11d48;
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    .dark & { background: #1f2937; color: #fb7185; }
+  }
+
+  .md-link {
+    color: #10a37f;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    font-weight: 500;
+    &:hover { color: #0d9268; }
+    .dark &       { color: #34d399; }
+    .dark &:hover { color: #6ee7b7; }
+  }
+
+  strong { font-weight: 600; }
+  em     { font-style: italic; }
+}
+
+/* ── Streaming cursor ────────────────────────────────────────────────────── */
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  background: #10a37f;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: cursor-blink 0.85s step-end infinite;
+}
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* ── Message action buttons ─────────────────────────────────────────────── */
+.msg-actions {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.msg-wrapper:hover .msg-actions {
+  opacity: 1;
+}
+
+/* ── Prompt card hover ───────────────────────────────────────────────────── */
+.prompt-card {
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  &:hover {
+    transform: translateY(-1px);
+  }
+  &:active {
+    transform: translateY(0);
+  }
+}
