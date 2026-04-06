@@ -9,6 +9,7 @@ import {
   SseErrorData,
   SseStatusData,
   SseTokenData,
+  StreamPhase,
 } from '../models/message.model';
 
 @Injectable({ providedIn: 'root' })
@@ -19,7 +20,7 @@ export class ChatService {
   readonly messages     = signal<ChatMessage[]>([]);
   readonly isLoading    = signal(false);
   readonly isSending    = signal(false);
-  readonly streamPhase  = signal<'searching' | 'writing' | null>(null);
+  readonly streamPhase  = signal<StreamPhase | null>(null);
   readonly error        = signal<string | null>(null);
   /** Increments on every token — lets chat-thread re-evaluate scroll position. */
   readonly streamTick   = signal(0);
@@ -163,9 +164,11 @@ export class ChatService {
               m.id === tempId
                 ? {
                     ...m,
-                    id:        d.message_id,
-                    citations: d.citations,
-                    meta:      d.meta,
+                    id:            d.message_id,
+                    citations:     d.citations,
+                    law_citations: d.law_citations  ?? [],
+                    echr_citations:d.echr_citations ?? [],
+                    meta:          d.meta,
                     status:    'done' as const,
                   }
                 : m
@@ -181,7 +184,7 @@ export class ChatService {
             const hasPartialContent = this.messages().find(m => m.id === tempId)?.content.length;
             this.messages.update(msgs => msgs.map(m =>
               m.id === tempId
-                ? { ...m, status: 'error' as const, isPartial: !!hasPartialContent }
+                ? { ...m, status: 'error' as const, isPartial: !!hasPartialContent, canRetry: !!hasPartialContent }
                 : m
             ));
             this.isSending.set(false);
@@ -195,7 +198,7 @@ export class ChatService {
         const hasPartial = !!this.messages().find(m => m.id === tempId)?.content.length;
         this.messages.update(msgs => msgs.map(m =>
           m.id === tempId
-            ? { ...m, status: 'error' as const, isPartial: hasPartial }
+            ? { ...m, status: 'error' as const, isPartial: hasPartial, canRetry: hasPartial }
             : m
         ));
         this.isSending.set(false);

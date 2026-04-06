@@ -7,7 +7,7 @@ use App\Http\Requests\Api\StoreChatMessageRequest;
 use App\Http\Requests\Api\StoreChatRequest;
 use App\Models\Chat;
 use App\Models\ChatMessage;
-use App\Services\AI\OpenAILegalAnswerService;
+use App\Contracts\AnswerServiceInterface;
 use App\Services\Legal\LegalChatOrchestratorService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -20,7 +20,7 @@ class LegalChatController extends Controller
 {
     public function __construct(
         private readonly LegalChatOrchestratorService $orchestrator,
-        private readonly OpenAILegalAnswerService     $answerer,
+        private readonly AnswerServiceInterface       $answerer,
     ) {}
 
     // -------------------------------------------------------------------------
@@ -170,6 +170,8 @@ class LegalChatController extends Controller
                     totalFound:      $ctx['retrieval']->totalMetaFound,
                     mode:            $ctx['mode'],
                     confidence:      $ctx['confidence'],
+                    lawResults:      $ctx['lawResults']  ?? [],
+                    echrResults:     $ctx['echrResults'] ?? [],
                 );
 
                 foreach ($generator as $token) {
@@ -181,9 +183,10 @@ class LegalChatController extends Controller
                 $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText);
 
                 $emit('done', [
-                    'message_id' => $assistantMessage->id,
-                    'citations'  => $assistantMessage->meta['citations']      ?? [],
-                    'meta'       => [
+                    'message_id'   => $assistantMessage->id,
+                    'citations'    => $assistantMessage->meta['citations']     ?? [],
+                    'law_citations'=> $assistantMessage->meta['law_citations'] ?? [],
+                    'meta'         => [
                         'retrieval_mode'   => $assistantMessage->meta['retrieval_mode']   ?? null,
                         'answer_mode'      => $assistantMessage->meta['answer_mode']      ?? null,
                         'confidence'       => $assistantMessage->meta['confidence']       ?? null,
@@ -221,8 +224,9 @@ class LegalChatController extends Controller
             'chat_id'    => $message->chat_id,
             'role'       => $message->role,
             'content'    => $message->content,
-            'citations'  => $message->meta['citations'] ?? [],
-            'meta'       => [
+            'citations'     => $message->meta['citations']     ?? [],
+            'law_citations' => $message->meta['law_citations'] ?? [],
+            'meta'          => [
                 'retrieval_mode'   => $message->meta['retrieval_mode']   ?? null,
                 'answer_mode'      => $message->meta['answer_mode']      ?? null,
                 'confidence'       => $message->meta['confidence']       ?? null,

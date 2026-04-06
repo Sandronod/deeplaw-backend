@@ -675,6 +675,13 @@ video {
   margin-top: 0.625rem;
 }
 
+.line-clamp-6 {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+
 .block {
   display: block;
 }
@@ -1072,6 +1079,12 @@ video {
   margin-bottom: calc(0.625rem * var(--tw-space-y-reverse));
 }
 
+.space-y-3 > :not([hidden]) ~ :not([hidden]) {
+  --tw-space-y-reverse: 0;
+  margin-top: calc(0.75rem * calc(1 - var(--tw-space-y-reverse)));
+  margin-bottom: calc(0.75rem * var(--tw-space-y-reverse));
+}
+
 .space-y-3\.5 > :not([hidden]) ~ :not([hidden]) {
   --tw-space-y-reverse: 0;
   margin-top: calc(0.875rem * calc(1 - var(--tw-space-y-reverse)));
@@ -1170,6 +1183,11 @@ video {
   border-color: rgb(16 163 127 / var(--tw-border-opacity, 1));
 }
 
+.border-blue-100 {
+  --tw-border-opacity: 1;
+  border-color: rgb(219 234 254 / var(--tw-border-opacity, 1));
+}
+
 .border-gray-100 {
   --tw-border-opacity: 1;
   border-color: rgb(243 244 246 / var(--tw-border-opacity, 1));
@@ -1230,6 +1248,15 @@ video {
 
 .bg-black\/40 {
   background-color: rgb(0 0 0 / 0.4);
+}
+
+.bg-blue-50\/60 {
+  background-color: rgb(239 246 255 / 0.6);
+}
+
+.bg-blue-500 {
+  --tw-bg-opacity: 1;
+  background-color: rgb(59 130 246 / var(--tw-bg-opacity, 1));
 }
 
 .bg-emerald-50 {
@@ -1533,6 +1560,16 @@ video {
   color: rgb(180 83 9 / var(--tw-text-opacity, 1));
 }
 
+.text-blue-500 {
+  --tw-text-opacity: 1;
+  color: rgb(59 130 246 / var(--tw-text-opacity, 1));
+}
+
+.text-blue-600 {
+  --tw-text-opacity: 1;
+  color: rgb(37 99 235 / var(--tw-text-opacity, 1));
+}
+
 .text-emerald-600 {
   --tw-text-opacity: 1;
   color: rgb(5 150 105 / var(--tw-text-opacity, 1));
@@ -1720,6 +1757,11 @@ video {
   border-color: rgb(16 163 127 / 0.4);
 }
 
+.hover\:border-blue-200:hover {
+  --tw-border-opacity: 1;
+  border-color: rgb(191 219 254 / var(--tw-border-opacity, 1));
+}
+
 .hover\:border-gray-200:hover {
   --tw-border-opacity: 1;
   border-color: rgb(229 231 235 / var(--tw-border-opacity, 1));
@@ -1732,6 +1774,11 @@ video {
 
 .hover\:bg-accent\/\[0\.03\]:hover {
   background-color: rgb(16 163 127 / 0.03);
+}
+
+.hover\:bg-blue-50:hover {
+  --tw-bg-opacity: 1;
+  background-color: rgb(239 246 255 / var(--tw-bg-opacity, 1));
 }
 
 .hover\:bg-gray-100:hover {
@@ -1757,6 +1804,11 @@ video {
 .hover\:text-accent-hover:hover {
   --tw-text-opacity: 1;
   color: rgb(13 146 104 / var(--tw-text-opacity, 1));
+}
+
+.hover\:text-blue-700:hover {
+  --tw-text-opacity: 1;
+  color: rgb(29 78 216 / var(--tw-text-opacity, 1));
 }
 
 .hover\:text-gray-200:hover {
@@ -1849,6 +1901,10 @@ video {
   border-color: rgb(16 163 127 / var(--tw-border-opacity, 1));
 }
 
+.dark\:border-blue-900\/40:is(.dark *) {
+  border-color: rgb(30 58 138 / 0.4);
+}
+
 .dark\:border-gray-700:is(.dark *) {
   --tw-border-opacity: 1;
   border-color: rgb(55 65 81 / var(--tw-border-opacity, 1));
@@ -1880,6 +1936,10 @@ video {
 
 .dark\:bg-amber-900\/30:is(.dark *) {
   background-color: rgb(120 53 15 / 0.3);
+}
+
+.dark\:bg-blue-950\/30:is(.dark *) {
+  background-color: rgb(23 37 84 / 0.3);
 }
 
 .dark\:bg-emerald-900\/30:is(.dark *) {
@@ -1921,6 +1981,11 @@ video {
 .dark\:text-amber-400:is(.dark *) {
   --tw-text-opacity: 1;
   color: rgb(251 191 36 / var(--tw-text-opacity, 1));
+}
+
+.dark\:text-blue-400:is(.dark *) {
+  --tw-text-opacity: 1;
+  color: rgb(96 165 250 / var(--tw-text-opacity, 1));
 }
 
 .dark\:text-emerald-400:is(.dark *) {
@@ -1978,6 +2043,11 @@ video {
   color: rgb(107 114 128 / var(--tw-placeholder-opacity, 1));
 }
 
+.dark\:hover\:border-blue-800:hover:is(.dark *) {
+  --tw-border-opacity: 1;
+  border-color: rgb(30 64 175 / var(--tw-border-opacity, 1));
+}
+
 .dark\:hover\:border-gray-600:hover:is(.dark *) {
   --tw-border-opacity: 1;
   border-color: rgb(75 85 99 / var(--tw-border-opacity, 1));
@@ -1985,6 +2055,10 @@ video {
 
 .dark\:hover\:bg-accent\/\[0\.07\]:hover:is(.dark *) {
   background-color: rgb(16 163 127 / 0.07);
+}
+
+.dark\:hover\:bg-blue-950\/50:hover:is(.dark *) {
+  background-color: rgb(23 37 84 / 0.5);
 }
 
 .dark\:hover\:bg-gray-700:hover:is(.dark *) {

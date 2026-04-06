@@ -2,24 +2,20 @@
 
 namespace App\Services\AI;
 
+use App\Contracts\EmbeddingServiceInterface;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Caching layer around OpenAIEmbeddingService.
- *
- * - Single embed():  full cache hit/miss
- * - Batch embedBatch(): per-text cache; only uncached texts hit the API
- *
- * TTL: 24h (embeddings are deterministic for same model+text)
- * Key: md5(text + model) to invalidate automatically on model change
+ * Caching layer around the active EmbeddingServiceInterface implementation.
+ * Works with both OpenAI and Gemini providers.
  */
 class EmbedCacheService
 {
     private const TTL_SECONDS = 86400; // 24 hours
 
     public function __construct(
-        private readonly OpenAIEmbeddingService $embedder,
+        private readonly EmbeddingServiceInterface $embedder,
     ) {}
 
     /**

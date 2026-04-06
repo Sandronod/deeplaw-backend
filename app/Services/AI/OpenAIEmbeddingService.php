@@ -6,7 +6,7 @@ use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
-class OpenAIEmbeddingService
+class OpenAIEmbeddingService implements \App\Contracts\EmbeddingServiceInterface
 {
     private string $apiKey;
     private string $model;

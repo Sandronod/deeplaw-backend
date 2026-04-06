@@ -12,11 +12,15 @@ use App\Services\AI\EmbedCacheService;
 use App\Services\AI\EvidenceBuilderService;
 use App\Services\AI\HyDEService;
 use App\Services\AI\IntentClassifierService;
-use App\Services\AI\OpenAILegalAnswerService;
+use App\Contracts\AnswerServiceInterface;
 use App\Services\AI\QueryExtractorService;
 use App\Services\AI\QueryParserService;
 use App\Services\AI\RerankerService;
 use App\Services\Chat\ChatTitleService;
+use App\Services\Echr\EchrCitationBuilder;
+use App\Services\Echr\EchrRetrieverService;
+use App\Services\Legal\KnowledgeSourceRouter;
+use App\Services\Legal\LawRetrieverService;
 use Illuminate\Support\Facades\Log;
 
 class LegalChatOrchestratorService
@@ -24,7 +28,7 @@ class LegalChatOrchestratorService
     public function __construct(
         private readonly EmbedCacheService         $embedCache,
         private readonly LegalCaseRetrieverService $retriever,
-        private readonly OpenAILegalAnswerService  $answerer,
+        private readonly AnswerServiceInterface    $answerer,
         private readonly ChatTitleService          $titleService,
         private readonly QueryExtractorService     $queryExtractor,
         private readonly QueryParserService        $queryParser,
@@ -33,6 +37,10 @@ class LegalChatOrchestratorService
         private readonly ConfidenceAssessor        $confidenceAssessor,
         private readonly RerankerService           $reranker,
         private readonly EvidenceBuilderService    $evidenceBuilder,
+        private readonly KnowledgeSourceRouter     $sourceRouter,
+        private readonly LawRetrieverService       $lawRetriever,
+        private readonly EchrRetrieverService      $echrRetriever,
+        private readonly EchrCitationBuilder       $echrCitationBuilder,
     ) {}
 
     /**
@@ -49,6 +57,8 @@ class LegalChatOrchestratorService
             totalFound:      $ctx['retrieval']->totalMetaFound,
             mode:            $ctx['mode'],
             confidence:      $ctx['confidence'],
+            lawResults:      $ctx['lawResults'],
+            echrResults:     $ctx['echrResults'],
         );
 
         $assistantMessage = $this->finalize($chat, $ctx, $answerText);
@@ -92,7 +102,7 @@ class LegalChatOrchestratorService
         ]);
 
         // ── 4. Retrieval pipeline ─────────────────────────────────────────────
-        [$retrieval, $parsedQuery, $debugFlags] = $this->runPipeline($intent, $userQuestion);
+        [$retrieval, $parsedQuery, $debugFlags, $rawEmbedding, $searchTerms] = $this->runPipeline($intent, $userQuestion);
 
         // ── 5. Confidence assessment ──────────────────────────────────────────
         $confidence = $this->confidenceAssessor->assess($retrieval);
@@ -115,7 +125,31 @@ class LegalChatOrchestratorService
         // ── 7. Evidence annotations ───────────────────────────────────────────
         $enrichedDecisions = $this->evidenceBuilder->build($userQuestion, $finalDecisions);
 
-        // ── 8. Conversation history ───────────────────────────────────────────
+        // ── 8. Source routing + Law + ECHR retrieval ──────────────────────────
+        $sourcePlan = $this->sourceRouter->plan($parsedQuery ?? $userQuestion);
+        $lawResults  = [];
+        $echrResults = [];
+
+        if ($intent !== 'chat' && isset($rawEmbedding)) {
+            if ($sourcePlan->useLaw) {
+                // Pass full $userQuestion — law retriever needs the law name for title matching.
+                $lawResults = $this->lawRetriever->retrieve($rawEmbedding, $userQuestion);
+
+                Log::debug('Orchestrator: law retrieval', [
+                    'law_count' => count($lawResults),
+                ]);
+            }
+
+            if ($sourcePlan->useEchr && $parsedQuery) {
+                $echrResults = $this->echrRetriever->retrieve($rawEmbedding, $userQuestion, $parsedQuery);
+
+                Log::debug('Orchestrator: echr retrieval', [
+                    'echr_count' => count($echrResults),
+                ]);
+            }
+        }
+
+        // ── 9. Conversation history ───────────────────────────────────────────
         $history = $this->buildHistory($chat, $userMessage->id);
 
         return [
@@ -129,6 +163,9 @@ class LegalChatOrchestratorService
             'debugFlags'     => $debugFlags,
             'confidence'     => $confidence,
             'finalDecisions' => $enrichedDecisions,
+            'lawResults'     => $lawResults,
+            'echrResults'    => $echrResults,
+            'sourcePlan'     => $sourcePlan,
             'history'        => $history,
         ];
     }
@@ -138,22 +175,54 @@ class LegalChatOrchestratorService
      */
     public function finalize(Chat $chat, array $ctx, string $answerText): ChatMessage
     {
-        $citations = $this->buildCitations($ctx['finalDecisions']);
+        $citations     = $this->buildCitations($ctx['finalDecisions']);
+        $lawCitations  = $this->buildLawCitations($ctx['lawResults']  ?? []);
+        $echrCitations = $this->echrCitationBuilder->build($ctx['echrResults'] ?? []);
+
+        $domesticConfidence = $ctx['confidence']->label;
+        $lawConfidence      = !empty($ctx['lawResults'])  ? 'high' : 'none';
+        $echrConfidence     = !empty($ctx['echrResults']) ? 'high' : 'none';
+
+        // Overall = domestic confidence (primary source).
+        // Boost to 'medium' if law/echr results exist but domestic is empty.
+        $overallConfidence = $domesticConfidence;
+        if ($overallConfidence === 'none' && ($lawConfidence === 'high' || $echrConfidence === 'high')) {
+            $overallConfidence = 'medium';
+        }
 
         return ChatMessage::create([
             'chat_id' => $chat->id,
             'role'    => 'assistant',
             'content' => $answerText,
             'meta'    => [
-                'retrieval_mode'       => $this->resolveMode($ctx['intent'], $ctx['retrieval']),
-                'answer_mode'          => $ctx['mode'],
-                'confidence'           => $ctx['confidence']->label,
+                // ── Evidence (structured) ─────────────────────────────────────
+                'evidence' => [
+                    'laws'           => $lawCitations,
+                    'domestic_cases' => $citations,
+                    'echr_cases'     => $echrCitations,
+                ],
+
+                // ── Confidence breakdown ──────────────────────────────────────
+                'law_confidence'      => $lawConfidence,
+                'domestic_confidence' => $domesticConfidence,
+                'echr_confidence'     => $echrConfidence,
+                'overall_confidence'  => $overallConfidence,
+
+                // ── Backward-compatible flat fields ───────────────────────────
+                'citations'            => $citations,
+                'law_citations'        => $lawCitations,
+                'echr_citations'       => $echrCitations,
+                'confidence'           => $overallConfidence,
                 'confidence_score'     => $ctx['confidence']->score,
                 'confidence_note'      => $ctx['confidence']->explanation,
+
+                // ── Retrieval metadata ────────────────────────────────────────
+                'retrieval_mode'       => $this->resolveMode($ctx['intent'], $ctx['retrieval']),
+                'answer_mode'          => $ctx['mode'],
+                'sources_active'       => $ctx['sourcePlan']->sourcesActive(),
                 'matched_case_ids'     => $ctx['retrieval']->matchedCaseIds,
                 'matched_case_numbers' => $ctx['retrieval']->matchedCaseNumbers,
                 'relevance_scores'     => $ctx['retrieval']->relevanceScores,
-                'citations'            => $citations,
                 'used_chunk_count'     => $ctx['retrieval']->usedChunkCount,
                 'used_case_count'      => count($ctx['finalDecisions']),
                 'total_meta_found'     => $ctx['retrieval']->totalMetaFound,
@@ -176,7 +245,7 @@ class LegalChatOrchestratorService
         ];
 
         if ($intent === 'chat') {
-            return [RetrievalResult::empty(), null, $debugFlags];
+            return [RetrievalResult::empty(), null, $debugFlags, null, null];
         }
 
         $searchTerms = $this->queryExtractor->extract($userQuestion);
@@ -220,7 +289,7 @@ class LegalChatOrchestratorService
             );
         }
 
-        return [$retrieval, $parsedQuery, $debugFlags];
+        return [$retrieval, $parsedQuery, $debugFlags, $rawEmbedding, $searchTerms];
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -247,6 +316,21 @@ class LegalChatOrchestratorService
             return 'chat';
         }
         return $retrieval->isEmpty() ? 'no_results' : 'grounded';
+    }
+
+    private function buildLawCitations(array $lawResults): array
+    {
+        return array_map(fn(\App\DTOs\LawResult $r) => [
+            'type'         => 'law',
+            'law_id'       => $r->lawId,
+            'article_id'   => $r->articleId,
+            'title'        => $r->title,
+            'article_num'  => $r->articleNum,
+            'article_title'=> $r->articleTitle,
+            'excerpt'      => $r->excerpt,
+            'similarity'   => $r->similarity,
+            'url'          => $r->sourceUrl,
+        ], $lawResults);
     }
 
     private function buildCitations(array $decisions): array

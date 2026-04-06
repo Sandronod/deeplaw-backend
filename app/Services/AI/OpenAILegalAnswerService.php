@@ -3,13 +3,14 @@
 namespace App\Services\AI;
 
 use App\DTOs\ConfidenceResult;
+use App\DTOs\LawResult;
 use GuzzleHttp\Client as GuzzleClient;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
-class OpenAILegalAnswerService
+class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 {
     private string $apiKey;
     private string $model;
@@ -48,9 +49,11 @@ class OpenAILegalAnswerService
         int             $totalFound = 0,
         string          $mode = 'explain',
         ConfidenceResult $confidence = new ConfidenceResult(0.0, 'none', ''),
+        array           $lawResults = [],
+        array           $echrResults = [],
     ): string {
         $systemPrompt = $this->buildSystemPrompt($mode, $confidence);
-        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode);
+        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults);
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
         try {
@@ -114,9 +117,11 @@ class OpenAILegalAnswerService
 📚 ცოდნის პრიორიტეტი (STRICT)
 ────────────────────────
 
-1. CONTEXT (მოწოდებული სასამართლო გადაწყვეტილებები)
-2. ზოგადი სამართლებრივი ცოდნა
-3. თუ არც ერთი არ არის საკმარისი → თქვი რომ ინფორმაცია არასაკმარისია
+1. RETRIEVED LEGISLATION (მოწოდებული კანონები/მუხლები) — თუ არსებობს
+2. RETRIEVED COURT DECISIONS (ქართული სასამართლო გადაწყვეტილებები) — თუ არსებობს
+3. RETRIEVED ECHR CASES (ადამიანის უფლებათა ევროპული სასამართლო) — თუ არსებობს
+4. ზოგადი სამართლებრივი ცოდნა
+5. თუ არც ერთი არ არის საკმარისი → თქვი რომ ინფორმაცია არასაკმარისია
 
 ❗ აკრძალულია:
 - არარსებული საქმეების გამოგონება
@@ -334,10 +339,70 @@ INST,
 
     // ── Context Block ─────────────────────────────────────────────────────────
 
-    private function buildContextBlock(array $decisions, int $totalFound = 0, string $mode = 'explain'): string
+    private function buildContextBlock(array $decisions, int $totalFound = 0, string $mode = 'explain', array $lawResults = [], array $echrResults = []): string
     {
+        $parts = [];
+
+        // ── Law articles block ────────────────────────────────────────────────
+        if (!empty($lawResults)) {
+            $lawBlock = ["RETRIEVED LEGISLATION:\n"];
+            foreach ($lawResults as $i => $law) {
+                /** @var LawResult $law */
+                $num          = $i + 1;
+                $articleLabel = $law->articleNum
+                    ? "{$law->articleNum}" . ($law->articleTitle ? " — {$law->articleTitle}" : '')
+                    : '';
+
+                $lawBlock[] = <<<BLOCK
+--- LAW #{$num} ---
+Law: {$law->title}
+{$articleLabel}
+Similarity: {$law->similarity}
+URL: {$law->sourceUrl}
+
+TEXT:
+{$law->excerpt}
+--- END LAW #{$num} ---
+BLOCK;
+            }
+            $parts[] = implode("\n\n", $lawBlock);
+        }
+
+        // ── ECHR cases block ──────────────────────────────────────────────────
+        if (!empty($echrResults)) {
+            $echrBlock = ["RETRIEVED ECHR CASES:\n"];
+            foreach ($echrResults as $i => $echr) {
+                $num         = $i + 1;
+                $articles    = !empty($echr['echr_articles']) ? implode(', ', $echr['echr_articles']) : 'N/A';
+                $importance  = match ($echr['importance'] ?? null) {
+                    1 => 'Key Case',
+                    2 => 'High Importance',
+                    3 => 'Medium',
+                    4 => 'Low',
+                    default => 'Unknown',
+                };
+
+                $echrBlock[] = <<<BLOCK
+--- ECHR CASE #{$num} ---
+Title: {$echr['title']}
+Application No: {$echr['application_number']}
+Date: {$echr['judgment_date']}
+Type: {$echr['document_type']} | Importance: {$importance}
+Articles: {$articles}
+URL: {$echr['url']}
+
+EXCERPT:
+{$echr['excerpt']}
+--- END ECHR CASE #{$num} ---
+BLOCK;
+            }
+            $parts[] = implode("\n\n", $echrBlock);
+        }
+
+        // ── Court decisions block ─────────────────────────────────────────────
         if (empty($decisions)) {
-            return "STATUS: NO_RESULTS\nმონაცემთა ბაზაში შესაბამისი გადაწყვეტილება ვერ მოიძებნა.";
+            $parts[] = "STATUS: NO_RESULTS\nმონაცემთა ბაზაში შესაბამისი გადაწყვეტილება ვერ მოიძებნა.";
+            return implode("\n\n────────────────────────\n\n", $parts);
         }
 
         $count     = count($decisions);
@@ -401,7 +466,9 @@ TEXT:
 BLOCK;
         }
 
-        return "RETRIEVED COURT DECISIONS:\n\n" . implode("\n\n", $blocks);
+        $parts[] = "RETRIEVED COURT DECISIONS:\n\n" . implode("\n\n", $blocks);
+
+        return implode("\n\n────────────────────────\n\n", $parts);
     }
 
     /**
@@ -465,9 +532,17 @@ BLOCK;
         int             $totalFound = 0,
         string          $mode = 'explain',
         ConfidenceResult $confidence = new ConfidenceResult(0.0, 'none', ''),
+        array           $lawResults = [],
+        array           $echrResults = [],
     ): \Generator {
+        // TODO: remove after testing
+        Log::info('OpenAILegalAnswerService: streamTokens called', [
+            'model' => $this->model,
+            'mode'  => $mode,
+        ]);
+
         $systemPrompt = $this->buildSystemPrompt($mode, $confidence);
-        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode);
+        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults);
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
         $client = new GuzzleClient();

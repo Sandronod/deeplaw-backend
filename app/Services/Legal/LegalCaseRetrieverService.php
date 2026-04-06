@@ -54,24 +54,27 @@ class LegalCaseRetrieverService
             ]);
         }
 
-        // ── 1. Vector search — raw embedding ─────────────────────────────────
+        // ── 1. Vector search — skipped when provider has no embeddings ───────
         $thresholds = [$baseScore, 0.50, 0.40];
         $rawChunks  = collect();
+        $useVector  = !empty($rawEmbedding) && config('ai.provider', 'openai') !== 'gemini';
 
-        foreach ($thresholds as $minScore) {
-            $rawChunks = LegalCase::vectorSearch($rawEmbedding, $chunkLimit, $minScore, $year);
-            if ($rawChunks->isNotEmpty()) {
-                Log::debug('Retriever: raw vector search', [
-                    'threshold' => $minScore,
-                    'found'     => $rawChunks->count(),
-                ]);
-                break;
+        if ($useVector) {
+            foreach ($thresholds as $minScore) {
+                $rawChunks = LegalCase::vectorSearch($rawEmbedding, $chunkLimit, $minScore, $year);
+                if ($rawChunks->isNotEmpty()) {
+                    Log::debug('Retriever: raw vector search', [
+                        'threshold' => $minScore,
+                        'found'     => $rawChunks->count(),
+                    ]);
+                    break;
+                }
             }
         }
 
         // ── 2. Vector search — HyDE embedding (if provided) ──────────────────
         $hydeChunks = collect();
-        if ($hydeEmbedding !== null) {
+        if ($useVector && $hydeEmbedding !== null) {
             foreach ($thresholds as $minScore) {
                 $hydeChunks = LegalCase::vectorSearch($hydeEmbedding, $chunkLimit, $minScore, $year);
                 if ($hydeChunks->isNotEmpty()) {
