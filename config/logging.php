@@ -127,6 +127,13 @@ return [
             'path' => storage_path('logs/laravel.log'),
         ],
 
+        'matsne' => [
+            'driver'              => 'single',
+            'path'                => storage_path('logs/matsne-sync.log'),
+            'level'               => 'debug',
+            'replace_placeholders'=> true,
+        ],
+
     ],
 
 ];

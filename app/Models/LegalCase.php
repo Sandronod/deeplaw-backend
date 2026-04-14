@@ -27,6 +27,7 @@ class LegalCase extends Model
         'content',
         'embedding',
         'meta',
+        'case_type',
     ];
 
     protected $casts = [
@@ -54,7 +55,7 @@ class LegalCase extends Model
             SELECT
                 id, case_id, case_num, dispute_subject, case_date,
                 category, result, claim_type, kind, chamber,
-                court, content, meta,
+                court, content, meta, case_type,
                 1 - (embedding <=> '{$vector}'::vector) AS similarity
             FROM cases
             WHERE 1 - (embedding <=> '{$vector}'::vector) >= ?
@@ -84,7 +85,7 @@ class LegalCase extends Model
             SELECT DISTINCT ON (case_id)
                 id, case_id, case_num, dispute_subject, case_date,
                 category, result, claim_type, kind, chamber,
-                court, content, meta
+                court, content, meta, case_type
             FROM cases
             WHERE (
                 case_num        ILIKE ?
@@ -124,7 +125,7 @@ class LegalCase extends Model
             ")
             ->get(['id', 'case_id', 'case_num', 'dispute_subject', 'case_date',
                    'category', 'result', 'claim_type', 'kind', 'chamber',
-                   'court', 'content', 'meta']);
+                   'court', 'content', 'meta', 'case_type']);
     }
 
     /**

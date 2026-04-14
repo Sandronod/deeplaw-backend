@@ -348,7 +348,8 @@ class LegalChatOrchestratorService
                 'dispute_subject' => $d['dispute_subject'],
                 'result'          => $d['result'],
                 'relevance_score' => $d['relevance_score'],
-                'url'             => "https://www.supremecourt.ge/ka/fullcase/{$d['case_id']}/0",
+                'case_type'       => $d['case_type'] ?? 'administrative',
+                'url'             => "/fullcase/{$d['case_type']}/{$d['case_id']}",
             ];
         }, $decisions);
     }

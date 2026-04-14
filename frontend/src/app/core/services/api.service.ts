@@ -40,6 +40,13 @@ export class ApiService {
       .pipe(map(r => r.data));
   }
 
+  getFullCase(type: string, caseId: number): Observable<{
+    case_id: number; case_type: string; case_num: string | null;
+    case_date: string | null; content: string; content_type: 'html' | 'text';
+  }> {
+    return this.http.get<any>(`${this.base}/cases/${type}/${caseId}`);
+  }
+
   /** Non-streaming fallback — returns full assistant message at once. */
   sendMessage(chatId: number, message: string): Observable<ChatMessage> {
     return this.http

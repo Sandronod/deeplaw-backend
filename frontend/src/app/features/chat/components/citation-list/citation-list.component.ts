@@ -1,11 +1,12 @@
 import { Component, Input, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { RouterLink } from '@angular/router';
 import { Citation, EchrCitation, LawCitation } from '../../../../core/models/message.model';
 
 @Component({
   selector: 'app-citation-list',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, RouterLink],
   template: `
     <div class="mt-1 space-y-3">
 
@@ -89,8 +90,8 @@ import { Citation, EchrCitation, LawCitation } from '../../../../core/models/mes
                         <p class="text-emerald-700 font-medium mt-0.5">{{ c.result }}</p>
                       </div>
                     }
-                    @if (c.url) {
-                      <a [href]="c.url" target="_blank" rel="noopener"
+                    @if (c.case_type && c.case_id) {
+                      <a [routerLink]="['/fullcase', c.case_type, c.case_id]" target="_blank"
                          class="inline-flex items-center gap-1.5 mt-1 text-xs text-accent
                                 hover:text-accent-hover font-medium transition-colors">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none"

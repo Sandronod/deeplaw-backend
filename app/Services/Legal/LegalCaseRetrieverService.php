@@ -321,6 +321,7 @@ class LegalCaseRetrieverService
                 'kind'            => $first->kind,
                 'chamber'         => $first->chamber,
                 'court'           => $first->court,
+                'case_type'       => $first->case_type ?? 'administrative',
                 'full_text'       => $fullText,
                 'excerpt'         => $excerpt,
                 'chunk_count'     => $uniqueChunks->count(),

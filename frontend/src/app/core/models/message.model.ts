@@ -16,6 +16,7 @@ export interface Citation {
   dispute_subject: string | null;
   result: string | null;
   relevance_score: number | null;
+  case_type: string | null;
   url: string | null;
 }
 

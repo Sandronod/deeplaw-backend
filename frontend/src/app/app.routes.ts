@@ -6,6 +6,11 @@ export const routes: Routes = [
     loadChildren: () =>
       import('./features/chat/chat.routes').then(m => m.CHAT_ROUTES),
   },
+  {
+    path: 'fullcase/:type/:caseId',
+    loadComponent: () =>
+      import('./features/fullcase/fullcase-page.component').then(m => m.FullcasePageComponent),
+  },
   { path: '', redirectTo: '/chats', pathMatch: 'full' },
   { path: '**', redirectTo: '/chats' },
 ];

@@ -19,6 +19,7 @@ class Law extends Model
         'adopted_at',
         'source_url',
         'current_version_id',
+        'content_hash',
     ];
 
     protected $casts = [
