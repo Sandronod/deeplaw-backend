@@ -13,6 +13,7 @@ class EmbedCivilCases extends Command
     protected $signature = 'embed:civil-cases
                             {--fresh : Delete civil rows from cases table before starting}
                             {--from=0 : Start from this CaseID}
+                            {--ids= : Comma-separated list of specific CaseIDs to embed}
                             {--limit=0 : Stop after this many cases (0 = no limit, use 1 for testing)}
                             {--batch=50 : Cases per MSSQL batch}';
 
@@ -36,6 +37,32 @@ class EmbedCivilCases extends Command
 
         $batchSize  = (int) $this->option('batch');
         $limit      = (int) $this->option('limit');
+
+        // --ids mode: embed specific CaseIDs only
+        $idsOption = $this->option('ids');
+        if ($idsOption !== null) {
+            $specificIds = array_filter(array_map('intval', explode(',', $idsOption)));
+            $this->info('IDs mode: ' . count($specificIds) . ' case(s) to embed.');
+
+            $totalCases  = 0;
+            $totalChunks = 0;
+
+            $cases = CaseCivil::with(['DecisionCivil', 'dic_Category', 'dic_Chamber', 'dic_Result', 'dic_ClaimType', 'dic_Kind'])
+                ->whereIn('CaseID', $specificIds)
+                ->orderBy('CaseID')
+                ->get();
+
+            foreach ($cases as $case) {
+                $chunks = $this->processCase($case, $totalCases, $totalChunks);
+                if ($chunks !== null) {
+                    $totalChunks += $chunks;
+                    $totalCases++;
+                }
+            }
+
+            $this->info("Finished. Civil cases embedded: {$totalCases}, total chunks: {$totalChunks}");
+            return self::SUCCESS;
+        }
 
         // Load already-embedded civil case_ids to skip
         $embedded = DB::connection('pgvector')
@@ -88,62 +115,11 @@ class EmbedCivilCases extends Command
                     continue;
                 }
 
-                $text = $this->extractText($case);
-
-                if (empty(trim($text))) {
-                    $this->warn("  empty CaseID={$case->CaseID} — skipping");
-                    continue;
+                $chunkCount = $this->processCase($case, $totalCases, $totalChunks);
+                if ($chunkCount !== null) {
+                    $totalChunks += $chunkCount;
+                    $totalCases++;
                 }
-
-                $chunks = $this->chunkText($text);
-                $total  = count($chunks);
-
-                for ($i = 0; $i < $total; $i += self::EMBED_BATCH) {
-                    $slice = array_slice($chunks, $i, self::EMBED_BATCH);
-                    try {
-                        $embeddings = $this->batchEmbed($slice);
-                    } catch (\Throwable $e) {
-                        $this->warn("  SKIP CaseID={$case->CaseID} chunk_batch={$i} — " . $e->getMessage());
-                        Log::warning('embed:civil-cases skip', ['case_id' => $case->CaseID, 'error' => $e->getMessage()]);
-                        continue 2;
-                    }
-
-                    foreach ($slice as $j => $chunk) {
-                        $chunkIndex = $i + $j;
-                        DB::connection('pgvector')->insert(
-                            "INSERT INTO cases (
-                                case_id, case_num, dispute_subject, case_date,
-                                category, result, claim_type, kind,
-                                chamber, court, content, embedding, meta, case_type
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::vector, ?::jsonb, ?)",
-                            [
-                                $case->CaseID,
-                                $case->CaseNum        ?? '',
-                                $case->DisputeSubject  ?? '',
-                                $case->CaseDate        ? date('Y-m-d', strtotime($case->CaseDate)) : null,
-                                $case->dic_Category?->Description  ?? '',
-                                $case->dic_Result?->Description    ?? '',
-                                $case->dic_ClaimType?->Description ?? '',
-                                $case->dic_Kind?->Description      ?? '',
-                                $case->dic_Chamber?->Description   ?? '',
-                                'საქართველოს უზენაესი სასამართლო',
-                                $chunk,
-                                '[' . implode(',', $embeddings[$j]) . ']',
-                                json_encode([
-                                    'chunk_index'  => $chunkIndex,
-                                    'total_chunks' => $total,
-                                ], JSON_UNESCAPED_UNICODE),
-                                'civil',
-                            ]
-                        );
-                    }
-                }
-
-                $totalChunks += $total;
-                $totalCases++;
-
-                $this->line("  done  CaseID={$case->CaseID}  chunks={$total}  total_cases={$totalCases}  total_chunks={$totalChunks}");
-                Log::info('embed:civil-cases', ['case_id' => $case->CaseID, 'chunks' => $total]);
             }
 
         } while ($batch->count() === $batchSize);
@@ -158,6 +134,65 @@ class EmbedCivilCases extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    private function processCase(CaseCivil $case, int $totalCases, int $totalChunks): ?int
+    {
+        $text = $this->extractText($case);
+
+        if (empty(trim($text))) {
+            $this->warn("  empty CaseID={$case->CaseID} — skipping");
+            return null;
+        }
+
+        $chunks = $this->chunkText($text);
+        $total  = count($chunks);
+
+        for ($i = 0; $i < $total; $i += self::EMBED_BATCH) {
+            $slice = array_slice($chunks, $i, self::EMBED_BATCH);
+            try {
+                $embeddings = $this->batchEmbed($slice);
+            } catch (\Throwable $e) {
+                $this->warn("  SKIP CaseID={$case->CaseID} chunk_batch={$i} — " . $e->getMessage());
+                Log::warning('embed:civil-cases skip', ['case_id' => $case->CaseID, 'error' => $e->getMessage()]);
+                return null;
+            }
+
+            foreach ($slice as $j => $chunk) {
+                $chunkIndex = $i + $j;
+                DB::connection('pgvector')->insert(
+                    "INSERT INTO cases (
+                        case_id, case_num, dispute_subject, case_date,
+                        category, result, claim_type, kind,
+                        chamber, court, content, embedding, meta, case_type
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::vector, ?::jsonb, ?)",
+                    [
+                        $case->CaseID,
+                        $case->CaseNum        ?? '',
+                        $case->DisputeSubject  ?? '',
+                        $case->CaseDate        ? date('Y-m-d', strtotime($case->CaseDate)) : null,
+                        $case->dic_Category?->Description  ?? '',
+                        $case->dic_Result?->Description    ?? '',
+                        $case->dic_ClaimType?->Description ?? '',
+                        $case->dic_Kind?->Description      ?? '',
+                        $case->dic_Chamber?->Description   ?? '',
+                        'საქართველოს უზენაესი სასამართლო',
+                        $chunk,
+                        '[' . implode(',', $embeddings[$j]) . ']',
+                        json_encode([
+                            'chunk_index'  => $chunkIndex,
+                            'total_chunks' => $total,
+                        ], JSON_UNESCAPED_UNICODE),
+                        'civil',
+                    ]
+                );
+            }
+        }
+
+        $this->line("  done  CaseID={$case->CaseID}  chunks={$total}  total_cases=" . ($totalCases + 1) . "  total_chunks=" . ($totalChunks + $total));
+        Log::info('embed:civil-cases', ['case_id' => $case->CaseID, 'chunks' => $total]);
+
+        return $total;
     }
 
     private function extractText(CaseCivil $case): string

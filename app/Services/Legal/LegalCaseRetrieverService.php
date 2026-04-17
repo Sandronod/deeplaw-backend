@@ -343,8 +343,8 @@ class LegalCaseRetrieverService
 
         // Extract chunk indices from meta
         $indices = $chunks
-            ->map(fn($c) => isset($c->meta['chunk_index'])
-                ? (int) $c->meta['chunk_index']
+            ->map(fn($c) => $c->chunk_index !== null
+                ? (int) $c->chunk_index
                 : null)
             ->filter(fn($v) => $v !== null)
             ->sort()

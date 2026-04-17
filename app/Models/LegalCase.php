@@ -3,134 +3,172 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Builder;
 
+/**
+ * LegalCase — query facade over the normalized court_cases + court_chunks tables.
+ *
+ * Schema:
+ *   court_cases  — one row per case (metadata: case_num, court, chamber, …)
+ *   court_chunks — many rows per case (content + 1024-dim embedding)
+ */
 class LegalCase extends Model
 {
-    protected $table = 'cases';
+    // Eloquent table — used only for chunksForCases() Eloquent fallback.
+    // All search methods use raw SQL with JOINs.
+    protected $table = 'court_chunks';
 
-    protected $primaryKey = 'id';
+    protected $connection = 'pgvector';
 
     public $timestamps = false;
 
-    protected $fillable = [
-        'case_id',
-        'case_num',
-        'dispute_subject',
-        'case_date',
-        'category',
-        'result',
-        'claim_type',
-        'kind',
-        'chamber',
-        'court',
-        'content',
-        'embedding',
-        'meta',
-        'case_type',
-    ];
-
-    protected $casts = [
-        'id'        => 'integer',
-        'case_id'   => 'integer',
-        'case_date' => 'date',
-        'meta'      => 'array',
-    ];
+    // ── Vector search ─────────────────────────────────────────────────────────
 
     /**
-     * Vector similarity search — returns top matching chunks with similarity score.
-     * Uses cosine distance (<=>). Lower distance = more similar.
+     * Cosine similarity search over court_chunks, returning one row per chunk
+     * enriched with court_cases metadata.
      *
-     * @param  array  $embedding  Float array from OpenAI
+     * @param  array  $embedding  1024-dim float array
      * @param  int    $limit
      * @param  float  $minScore   Cosine similarity threshold (0–1)
+     * @param  int|null $year     Filter by case year
      */
-    public static function vectorSearch(array $embedding, int $limit = 20, float $minScore = 0.65, ?int $year = null): \Illuminate\Support\Collection
-    {
+    public static function vectorSearch(
+        array $embedding,
+        int   $limit    = 20,
+        float $minScore = 0.65,
+        ?int  $year     = null,
+    ): \Illuminate\Support\Collection {
         $vector = self::formatVector($embedding);
-
-        $yearFilter = $year ? "AND EXTRACT(YEAR FROM case_date) = {$year}" : '';
+        $yearFilter = $year
+            ? "AND EXTRACT(YEAR FROM cm.case_date) = {$year}"
+            : '';
 
         $sql = <<<SQL
             SELECT
-                id, case_id, case_num, dispute_subject, case_date,
-                category, result, claim_type, kind, chamber,
-                court, content, meta, case_type,
-                1 - (embedding <=> '{$vector}'::vector) AS similarity
-            FROM cases
-            WHERE 1 - (embedding <=> '{$vector}'::vector) >= ?
+                cc.id,
+                cm.id              AS case_id,
+                cm.case_num,
+                cm.dispute_subject,
+                cm.case_date,
+                cm.category,
+                cm.result,
+                cm.claim_type,
+                cm.kind,
+                cm.chamber,
+                cm.court,
+                cm.case_type,
+                cc.content,
+                cc.chunk_index,
+                1 - (cc.embedding <=> '{$vector}'::vector) AS similarity
+            FROM court_chunks cc
+            JOIN court_cases  cm ON cm.id = cc.case_id
+            WHERE 1 - (cc.embedding <=> '{$vector}'::vector) >= ?
             {$yearFilter}
-            ORDER BY embedding <=> '{$vector}'::vector
+            ORDER BY cc.embedding <=> '{$vector}'::vector
             LIMIT ?
         SQL;
 
-        return collect(\Illuminate\Support\Facades\DB::select($sql, [$minScore, $limit]));
+        return collect(\Illuminate\Support\Facades\DB::connection('pgvector')->select($sql, [$minScore, $limit]));
     }
 
-    /**
-     * Metadata search — ეძებს case_num, court, chamber, category, dispute_subject,
-     * claim_type, kind, result და content სვეტებში ILIKE-ით.
-     *
-     * DISTINCT ON (case_id) — ერთი row per case, არა per chunk.
-     * ეს კრიტიკულია: სახელის ძებნისას content-ში ბევრი chunk შეიძლება match-ოს,
-     * მაგრამ ჩვენ case-ები გვინდა, არა ცალკეული chunk-ები.
-     */
-    public static function metadataSearch(string $query, int $limit = 30, ?int $year = null): \Illuminate\Support\Collection
-    {
-        $term = '%' . trim($query) . '%';
+    // ── Metadata search ───────────────────────────────────────────────────────
 
-        $yearFilter = $year ? "AND EXTRACT(YEAR FROM case_date) = {$year}" : '';
+    /**
+     * ILIKE search across case metadata and chunk content.
+     * Returns one row per case (DISTINCT ON case_id).
+     */
+    public static function metadataSearch(
+        string $query,
+        int    $limit = 30,
+        ?int   $year  = null,
+    ): \Illuminate\Support\Collection {
+        $term = '%' . trim($query) . '%';
+        $yearFilter = $year
+            ? "AND EXTRACT(YEAR FROM cm.case_date) = {$year}"
+            : '';
 
         $sql = <<<SQL
-            SELECT DISTINCT ON (case_id)
-                id, case_id, case_num, dispute_subject, case_date,
-                category, result, claim_type, kind, chamber,
-                court, content, meta, case_type
-            FROM cases
+            SELECT DISTINCT ON (cm.id)
+                cc.id,
+                cm.id              AS case_id,
+                cm.case_num,
+                cm.dispute_subject,
+                cm.case_date,
+                cm.category,
+                cm.result,
+                cm.claim_type,
+                cm.kind,
+                cm.chamber,
+                cm.court,
+                cm.case_type,
+                cc.content,
+                cc.chunk_index
+            FROM court_cases  cm
+            JOIN court_chunks cc ON cc.case_id = cm.id
             WHERE (
-                case_num        ILIKE ?
-               OR dispute_subject ILIKE ?
-               OR category        ILIKE ?
-               OR result          ILIKE ?
-               OR claim_type      ILIKE ?
-               OR kind            ILIKE ?
-               OR chamber         ILIKE ?
-               OR court           ILIKE ?
-               OR content         ILIKE ?
+                cm.case_num         ILIKE ?
+                OR cm.dispute_subject ILIKE ?
+                OR cm.category        ILIKE ?
+                OR cm.result          ILIKE ?
+                OR cm.claim_type      ILIKE ?
+                OR cm.kind            ILIKE ?
+                OR cm.chamber         ILIKE ?
+                OR cm.court           ILIKE ?
+                OR cc.content         ILIKE ?
             )
             {$yearFilter}
-            ORDER BY case_id, id
+            ORDER BY cm.id, cc.id
             LIMIT ?
         SQL;
 
-        return collect(\Illuminate\Support\Facades\DB::select($sql, [
+        return collect(\Illuminate\Support\Facades\DB::connection('pgvector')->select($sql, [
             $term, $term, $term, $term, $term,
             $term, $term, $term, $term,
             $limit,
         ]));
     }
 
+    // ── Chunk reconstruction ──────────────────────────────────────────────────
+
     /**
-     * Fetch all chunks for given case_ids, ordered correctly.
+     * Fetch all chunks for given case_ids, ordered by chunk_index then id.
+     * Enriched with court_cases metadata via JOIN.
      */
     public static function chunksForCases(array $caseIds): \Illuminate\Support\Collection
     {
-        return static::whereIn('case_id', $caseIds)
-            ->orderByRaw("
-                CASE
-                    WHEN meta->>'chunk_index' IS NOT NULL
-                    THEN (meta->>'chunk_index')::int
-                    ELSE id
-                END ASC
-            ")
-            ->get(['id', 'case_id', 'case_num', 'dispute_subject', 'case_date',
-                   'category', 'result', 'claim_type', 'kind', 'chamber',
-                   'court', 'content', 'meta', 'case_type']);
+        if (empty($caseIds)) {
+            return collect();
+        }
+
+        $placeholders = implode(',', array_fill(0, count($caseIds), '?'));
+
+        $sql = <<<SQL
+            SELECT
+                cc.id,
+                cc.case_id,
+                cc.chunk_index,
+                cc.content,
+                cm.case_num,
+                cm.dispute_subject,
+                cm.case_date,
+                cm.category,
+                cm.result,
+                cm.claim_type,
+                cm.kind,
+                cm.chamber,
+                cm.court,
+                cm.case_type
+            FROM court_chunks cc
+            JOIN court_cases  cm ON cm.id = cc.case_id
+            WHERE cc.case_id IN ({$placeholders})
+            ORDER BY cc.chunk_index ASC NULLS LAST, cc.id ASC
+        SQL;
+
+        return collect(\Illuminate\Support\Facades\DB::connection('pgvector')->select($sql, $caseIds));
     }
 
-    /**
-     * Formats a float array as a pgvector literal string.
-     */
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
     public static function formatVector(array $embedding): string
     {
         return '[' . implode(',', array_map('floatval', $embedding)) . ']';

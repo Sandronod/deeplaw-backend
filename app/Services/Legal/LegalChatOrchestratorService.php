@@ -271,14 +271,18 @@ class LegalChatOrchestratorService
                 parsed:        $parsedQuery,
             );
         } else {
-            $hydeDoc = $this->hyde->generate($searchTerms);
-            [$rawEmbedding, $hydeEmbedding] = $this->embedCache->embedBatch([
-                $searchTerms,
-                $hydeDoc,
-            ]);
-            $debugFlags['hyde_used']          = true;
-            $debugFlags['retrieval_strategy'] = 'dual_vector+metadata';
-            Log::debug('Orchestrator: dual embedding retrieved');
+            // HyDE temporarily disabled for speed testing
+            // $hydeDoc = $this->hyde->generate($searchTerms);
+            // [$rawEmbedding, $hydeEmbedding] = $this->embedCache->embedBatch([
+            //     $searchTerms,
+            //     $hydeDoc,
+            // ]);
+            // $debugFlags['hyde_used']          = true;
+            $rawEmbedding = $this->embedCache->embed($searchTerms);
+            $hydeEmbedding = null;
+            $debugFlags['hyde_used']          = false;
+            $debugFlags['retrieval_strategy'] = 'vector+metadata';
+            Log::debug('Orchestrator: single embedding (HyDE disabled)');
 
             $retrieval = $this->retriever->retrieve(
                 rawEmbedding:  $rawEmbedding,
