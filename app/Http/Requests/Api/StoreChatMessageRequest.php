@@ -15,6 +15,8 @@ class StoreChatMessageRequest extends FormRequest
     {
         return [
             'message' => ['required', 'string', 'min:2', 'max:4000'],
+            'sources'   => ['sometimes', 'array'],
+            'sources.*' => ['string', 'in:court,matsne,eu,german,const_court'],
         ];
     }
 

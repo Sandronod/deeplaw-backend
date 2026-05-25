@@ -1,0 +1,288 @@
+<?php
+
+namespace App\Services\Matsne;
+
+use App\Services\AI\OllamaEmbeddingService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+class MatsneRetrieverService
+{
+    private const THRESHOLDS  = [0.60, 0.45, 0.35];
+    private const CHUNK_LIMIT = 40;
+    private const DOC_LIMIT   = 5;
+
+    public function __construct(
+        private readonly OllamaEmbeddingService $embedder,
+    ) {}
+
+    public function embedQuery(string $query): array
+    {
+        return $this->embedder->embed($query);
+    }
+
+    /**
+     * Retrieve matsne documents with optional domain filtering and lex specialis ordering.
+     *
+     * When $domains is non-empty, results are filtered to those domains first
+     * (falls back to all domains if domain-filtered search returns nothing).
+     *
+     * Lex specialis sort: hierarchy_level ASC → similarity DESC
+     *   1=constitution → 7=local act
+     *
+     * @param  string[] $domains  Legal domains to filter by (empty = no filter)
+     * @return array<int, array{matsne_id, title, doc_type, issuer, is_active, excerpt, similarity, url, hierarchy_level}>
+     */
+    public function retrieve(string $query, int $limit = self::DOC_LIMIT, array $embedding = [], array $domains = []): array
+    {
+        if (empty($embedding)) {
+            $embedding = $this->embedder->embed($query);
+        }
+
+        $keywordResults  = $this->keywordSearch($query, $limit * 2, $domains);
+        $semanticResults = [];
+
+        if (!empty($embedding)) {
+            $semanticResults = $this->vectorSearch($embedding, $limit, $domains);
+        } else {
+            Log::debug('MatsneRetriever: embedding failed, keyword-only mode');
+        }
+
+        // Domain-filtered results
+        $results = $this->mergeResults($keywordResults, $semanticResults, $limit);
+
+        // If domain filter yields nothing, retry without filter (graceful fallback)
+        if (empty($results) && !empty($domains)) {
+            Log::debug('MatsneRetriever: domain filter returned empty, retrying without filter', ['domains' => $domains]);
+            $kwFallback  = $this->keywordSearch($query, $limit * 2, []);
+            $vecFallback = !empty($embedding) ? $this->vectorSearch($embedding, $limit, []) : [];
+            $results     = $this->mergeResults($kwFallback, $vecFallback, $limit);
+        }
+
+        Log::debug('MatsneRetriever: complete', [
+            'query'    => mb_substr($query, 0, 80),
+            'keyword'  => count($keywordResults),
+            'semantic' => count($semanticResults),
+            'merged'   => count($results),
+            'domains'  => $domains,
+        ]);
+
+        return $results;
+    }
+
+    private function keywordSearch(string $query, int $limit, array $domains): array
+    {
+        $lines = array_filter(
+            preg_split('/\n+/u', trim($query)),
+            fn($l) => mb_strlen(trim($l)) >= 3
+        );
+        $phrases = array_values(array_map('trim', $lines));
+
+        if (count($phrases) <= 1) {
+            $phrases = array_values(array_filter(
+                preg_split('/\s+/u', mb_strtolower(trim($query))),
+                fn($w) => mb_strlen($w) >= 4
+            ));
+        }
+
+        if (empty($phrases)) {
+            return [];
+        }
+
+        $conditions = [];
+        $params     = [];
+        foreach ($phrases as $i => $phrase) {
+            $key = "kw{$i}";
+            $pat = '%' . mb_strtolower($phrase) . '%';
+            $conditions[] = "(LOWER(mc.title) LIKE :{$key} OR LOWER(mc.content) LIKE :{$key}b)";
+            $params[$key]        = $pat;
+            $params[$key . 'b']  = $pat;
+        }
+
+        $where       = implode(' OR ', $conditions);
+        $domainSql   = $this->domainSql($domains);
+        $params['lim'] = $limit;
+
+        try {
+            $rows = DB::connection('pgvector')->select("
+                SELECT DISTINCT ON (mc.matsne_id)
+                    mc.matsne_id,
+                    mc.title,
+                    mc.doc_type,
+                    mc.issuer,
+                    mc.is_active,
+                    mc.effective_from_year,
+                    mc.effective_to_year,
+                    mc.content,
+                    mc.chunk_index,
+                    COALESCE(md.hierarchy_level, 5) AS hierarchy_level
+                FROM matsne_chunks_v2 mc
+                LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
+                WHERE ({$where})
+                  {$domainSql}
+                ORDER BY mc.matsne_id, mc.chunk_index ASC
+                LIMIT :lim
+            ", array_merge($params, $this->domainBindings($domains)));
+        } catch (\Throwable $e) {
+            Log::warning('MatsneRetriever: keywordSearch failed', ['error' => $e->getMessage()]);
+            return [];
+        }
+
+        $byDoc = [];
+        foreach ($rows as $row) {
+            $id = $row->matsne_id;
+            $byDoc[$id] = [
+                'matsne_id'           => $id,
+                'title'               => $row->title ?? "Matsne #{$id}",
+                'doc_type'            => $row->doc_type,
+                'issuer'              => $row->issuer,
+                'is_active'           => $row->is_active,
+                'effective_from_year' => $row->effective_from_year,
+                'effective_to_year'   => $row->effective_to_year,
+                'similarity'          => 0.80,
+                'excerpt'             => mb_substr($row->content ?? '', 0, 1500),
+                'url'                 => "https://matsne.gov.ge/ka/document/view/{$id}/0",
+                'hierarchy_level'     => (int) ($row->hierarchy_level ?? 5),
+                '_source'             => 'keyword',
+            ];
+        }
+
+        return array_values($byDoc);
+    }
+
+    private function vectorSearch(array $embedding, int $limit, array $domains): array
+    {
+        $vec         = '[' . implode(',', $embedding) . ']';
+        $domainSql   = $this->domainSql($domains);
+        $domainBinds = $this->domainBindings($domains);
+
+        foreach (self::THRESHOLDS as $threshold) {
+            $rows = DB::connection('pgvector')->select("
+                SELECT
+                    mc.matsne_id,
+                    mc.title,
+                    mc.doc_type,
+                    mc.issuer,
+                    mc.is_active,
+                    mc.effective_from_year,
+                    mc.effective_to_year,
+                    mc.content,
+                    mc.chunk_index,
+                    1 - (mc.embedding <=> :emb::vector) AS similarity,
+                    COALESCE(md.hierarchy_level, 5) AS hierarchy_level
+                FROM matsne_chunks_v2 mc
+                LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
+                WHERE mc.embedding IS NOT NULL
+                  AND mc.is_active = true
+                  AND 1 - (mc.embedding <=> :emb2::vector) >= :threshold
+                  {$domainSql}
+                ORDER BY similarity DESC
+                LIMIT :chunk_limit
+            ", array_merge([
+                'emb'         => $vec,
+                'emb2'        => $vec,
+                'threshold'   => $threshold,
+                'chunk_limit' => self::CHUNK_LIMIT,
+            ], $domainBinds));
+
+            if (!empty($rows)) {
+                return $this->groupByDocument($rows, $limit);
+            }
+        }
+
+        return [];
+    }
+
+    private function mergeResults(array $keyword, array $semantic, int $limit): array
+    {
+        $merged = [];
+        $seen   = [];
+
+        foreach ($keyword as $doc) {
+            $id = $doc['matsne_id'];
+            $merged[$id] = $doc;
+            $seen[$id]   = true;
+        }
+
+        foreach ($semantic as $doc) {
+            $id = $doc['matsne_id'];
+            if (!isset($seen[$id])) {
+                $merged[$id] = $doc;
+            }
+        }
+
+        // Lex specialis: hierarchy_level ASC → similarity DESC
+        usort($merged, function ($a, $b) {
+            $hlA = (int) ($a['hierarchy_level'] ?? 5);
+            $hlB = (int) ($b['hierarchy_level'] ?? 5);
+            if ($hlA !== $hlB) return $hlA <=> $hlB;
+            return $b['similarity'] <=> $a['similarity'];
+        });
+
+        return array_slice(array_values($merged), 0, $limit);
+    }
+
+    private function groupByDocument(array $rows, int $limit): array
+    {
+        $byDoc = [];
+
+        foreach ($rows as $row) {
+            $id = $row->matsne_id;
+            if (!isset($byDoc[$id])) {
+                $byDoc[$id] = [
+                    'matsne_id'           => $id,
+                    'title'               => $row->title ?? "Matsne #{$id}",
+                    'doc_type'            => $row->doc_type,
+                    'issuer'             => $row->issuer,
+                    'is_active'           => $row->is_active,
+                    'effective_from_year' => $row->effective_from_year,
+                    'effective_to_year'   => $row->effective_to_year,
+                    'similarity'          => (float) $row->similarity,
+                    'hierarchy_level'     => (int) ($row->hierarchy_level ?? 5),
+                    'chunks'              => [],
+                ];
+            }
+
+            if ((float) $row->similarity > $byDoc[$id]['similarity']) {
+                $byDoc[$id]['similarity'] = (float) $row->similarity;
+            }
+
+            $byDoc[$id]['chunks'][] = $row->content;
+        }
+
+        // Lex specialis sort
+        usort($byDoc, function ($a, $b) {
+            if ($a['hierarchy_level'] !== $b['hierarchy_level']) {
+                return $a['hierarchy_level'] <=> $b['hierarchy_level'];
+            }
+            return $b['similarity'] <=> $a['similarity'];
+        });
+
+        return array_map(function (array $doc) {
+            $doc['excerpt'] = mb_substr(implode("\n\n", array_slice($doc['chunks'], 0, 3)), 0, 1500);
+            $doc['url']     = "https://matsne.gov.ge/ka/document/view/{$doc['matsne_id']}/0";
+            unset($doc['chunks']);
+            return $doc;
+        }, array_slice($byDoc, 0, $limit));
+    }
+
+    // ── Domain filter helpers ─────────────────────────────────────────────────
+
+    private function domainSql(array $domains): string
+    {
+        if (empty($domains)) {
+            return '';
+        }
+        $placeholders = implode(',', array_map(fn($i) => ":dom{$i}", array_keys($domains)));
+        return "AND (md.domain IN ({$placeholders}) OR md.domain IS NULL)";
+    }
+
+    private function domainBindings(array $domains): array
+    {
+        $bindings = [];
+        foreach (array_values($domains) as $i => $domain) {
+            $bindings["dom{$i}"] = $domain;
+        }
+        return $bindings;
+    }
+}

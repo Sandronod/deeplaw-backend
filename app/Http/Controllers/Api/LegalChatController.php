@@ -28,7 +28,8 @@ class LegalChatController extends Controller
     // -------------------------------------------------------------------------
     public function index(): JsonResponse
     {
-        $chats = Chat::orderByDesc('updated_at')
+        $chats = Chat::where('user_id', auth()->id())
+            ->orderByDesc('updated_at')
             ->select(['id', 'title', 'created_at', 'updated_at'])
             ->get();
 
@@ -41,7 +42,8 @@ class LegalChatController extends Controller
     public function store(StoreChatRequest $request): JsonResponse
     {
         $chat = Chat::create([
-            'title' => $request->input('title'),
+            'user_id' => auth()->id(),
+            'title'   => $request->input('title'),
         ]);
 
         return response()->json(['data' => $chat], 201);
@@ -97,10 +99,12 @@ class LegalChatController extends Controller
     // -------------------------------------------------------------------------
     public function sendMessage(StoreChatMessageRequest $request, Chat $chat): JsonResponse
     {
+        set_time_limit(180);
         try {
             $result = $this->orchestrator->handle(
                 chat:         $chat,
                 userQuestion: $request->input('message'),
+                sources:      $request->input('sources', ['court', 'matsne', 'eu', 'german', 'const_court']),
             );
 
             return response()->json([
@@ -138,6 +142,8 @@ class LegalChatController extends Controller
     {
         return response()->stream(function () use ($request, $chat) {
 
+            set_time_limit(120);
+
             // Disable output buffering for true streaming
             if (ob_get_level()) {
                 ob_end_clean();
@@ -157,6 +163,7 @@ class LegalChatController extends Controller
                 $ctx = $this->orchestrator->prepare(
                     chat:         $chat,
                     userQuestion: $request->input('message'),
+                    sources:      $request->input('sources', ['court', 'matsne', 'eu', 'german', 'const_court']),
                 );
 
                 // ── Stage 2: stream LLM tokens ────────────────────────────────
@@ -170,8 +177,14 @@ class LegalChatController extends Controller
                     totalFound:      $ctx['retrieval']->totalMetaFound,
                     mode:            $ctx['mode'],
                     confidence:      $ctx['confidence'],
-                    lawResults:      $ctx['lawResults']  ?? [],
-                    echrResults:     $ctx['echrResults'] ?? [],
+                    lawResults:      $ctx['lawResults']   ?? [],
+                    echrResults:     $ctx['echrResults']  ?? [],
+                    matsneResults:   $ctx['matsneResults'] ?? [],
+                    euResults:          $ctx['euResults']          ?? [],
+                    germanResults:      $ctx['germanResults']      ?? [],
+                    constCourtResults:  $ctx['constCourtResults']  ?? [],
+                    sources:            $ctx['sources'],
+                    issueList:          $ctx['issueList'],
                 );
 
                 foreach ($generator as $token) {
@@ -183,9 +196,13 @@ class LegalChatController extends Controller
                 $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText);
 
                 $emit('done', [
-                    'message_id'   => $assistantMessage->id,
-                    'citations'    => $assistantMessage->meta['citations']     ?? [],
-                    'law_citations'=> $assistantMessage->meta['law_citations'] ?? [],
+                    'message_id'      => $assistantMessage->id,
+                    'citations'        => $assistantMessage->meta['citations']          ?? [],
+                    'law_citations'    => $assistantMessage->meta['law_citations']      ?? [],
+                    'matsne_citations' => $assistantMessage->meta['matsne_citations']   ?? [],
+                    'eu_citations'     => $assistantMessage->meta['eu_citations']       ?? [],
+                    'german_citations'      => $assistantMessage->meta['german_citations']       ?? [],
+                    'const_court_citations' => $assistantMessage->meta['const_court_citations']  ?? [],
                     'meta'         => [
                         'retrieval_mode'   => $assistantMessage->meta['retrieval_mode']   ?? null,
                         'answer_mode'      => $assistantMessage->meta['answer_mode']      ?? null,
@@ -224,8 +241,12 @@ class LegalChatController extends Controller
             'chat_id'    => $message->chat_id,
             'role'       => $message->role,
             'content'    => $message->content,
-            'citations'     => $message->meta['citations']     ?? [],
-            'law_citations' => $message->meta['law_citations'] ?? [],
+            'citations'        => $message->meta['citations']          ?? [],
+            'law_citations'    => $message->meta['law_citations']      ?? [],
+            'matsne_citations' => $message->meta['matsne_citations']   ?? [],
+            'eu_citations'     => $message->meta['eu_citations']       ?? [],
+            'german_citations'      => $message->meta['german_citations']       ?? [],
+            'const_court_citations' => $message->meta['const_court_citations']  ?? [],
             'meta'          => [
                 'retrieval_mode'   => $message->meta['retrieval_mode']   ?? null,
                 'answer_mode'      => $message->meta['answer_mode']      ?? null,

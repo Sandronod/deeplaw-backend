@@ -3,7 +3,9 @@
 namespace App\Services\AI;
 
 use App\DTOs\ConfidenceResult;
+use App\DTOs\IssueList;
 use App\DTOs\LawResult;
+use App\Services\Legal\LegalGlossaryService;
 use GuzzleHttp\Client as GuzzleClient;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
@@ -19,7 +21,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
     private int    $maxTokens;
     private float  $temperature;
 
-    public function __construct()
+    public function __construct(private readonly LegalGlossaryService $glossary)
     {
         $this->apiKey      = config('openai.api_key');
         $this->model       = config('openai.chat_model', 'gpt-4.1');
@@ -51,9 +53,15 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         ConfidenceResult $confidence = new ConfidenceResult(0.0, 'none', ''),
         array           $lawResults = [],
         array           $echrResults = [],
+        array           $matsneResults = [],
+        array           $euResults = [],
+        array           $germanResults = [],
+        array           $constCourtResults = [],
+        array           $sources = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        ?IssueList      $issueList = null,
     ): string {
-        $systemPrompt = $this->buildSystemPrompt($mode, $confidence);
-        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults);
+        $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion);
+        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults);
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
         try {
@@ -100,17 +108,28 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 
     // ── System Prompt ─────────────────────────────────────────────────────────
 
-    private function buildSystemPrompt(string $mode, ConfidenceResult $confidence): string
+    private function buildSystemPrompt(string $mode, ConfidenceResult $confidence, array $sources = [], bool $hasMatsneResults = false, ?IssueList $issueList = null, string $userQuestion = ''): string
     {
         $modeInstruction    = $this->buildModeInstruction($mode);
-        $confidenceSection  = $this->buildConfidenceInstruction($confidence);
+        $confidenceSection  = $this->buildConfidenceInstruction($confidence, $sources, $hasMatsneResults);
+        $issueSection       = ($issueList?->isComplex) ? $issueList->toPromptBlock() : '';
+        $glossaryBlock      = $userQuestion ? $this->glossary->buildPromptBlock($userQuestion, 8) : '';
 
         return <<<PROMPT
 შენ ხარ პროფესიონალი იურიდიული ასისტენტი (Legal Copilot), რომელიც ეხმარება იურისტებს სასამართლო პრაქტიკის ანალიზში.
 
+────────────────────────
+🧠 CORE PRINCIPLE
+────────────────────────
+
+შენი ფუნქცია სამართლებრივი ანალიზია — არა პასუხის ძებნა.
+
+❌ არასწორი მიდგომა: "CONTEXT-ში ვეძებ პასუხს და ვიმეორებ"
+✅ სწორი მიდგომა: "სიტუაციაში ვამოვყოფ სამართლებრივ საკითხებს → თითოეულს ვაანალიზებ → დასკვნას ვაყალიბებ"
+
 შენი მთავარი ამოცანაა:
-- უპასუხო შეკითხვებს სამართლებრივად სწორად
-- დაეყრდნო პირველ რიგში მოწოდებულ სასამართლო გადაწყვეტილებებს (CONTEXT)
+- ამოიყვანო სამართლებრივი საკითხები, არ გაიმეორო მომხმარებლის სიტყვები
+- გაანალიზო: კანონი → სასამართლო პრაქტიკა → ფაქტებზე გამოყენება
 - არ მოიგონო ფაქტები, საქმეები ან სამართლებრივი დეტალები
 
 ────────────────────────
@@ -130,33 +149,70 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 - CONTEXT-ში არარსებული ფაქტების დამატება
 
 ────────────────────────
-🔍 პასუხის ფორმატი (MANDATORY)
+⚖️ LEGAL INTERPRETATION RULES (სამართლის ინტერპრეტაციის წესები)
 ────────────────────────
 
-ყოველ პასუხში დაიცავი ეს სტრუქტურა:
+თუ CONTEXT-ში ან ზოგადი ცოდნიდან ორი ან მეტი ნორმა ეხება ერთ საკითხს:
 
-1. 🧾 გამოყენებული საქმეები (Evidence)
-   - ჩამოთვალე გამოყენებული საქმეები (case number, სასამართლო, წელი)
-   - თითოეულზე მოკლედ: რა საკითხზეა და რა დაადგინა
-   - 🔗 [სრული ტექსტი](https://www.supremecourt.ge/ka/fullcase/{case_id}/0)
+**ნაბიჯი 1 — CONFLICT DETECTION:**
+შეამოწმე, ეწინააღმდეგება თუ არა ნორმები ერთმანეთს.
+თუ კი → სავალდებულოა ინტერპრეტაციის წესების გამოყენება (ნაბიჯი 2).
+თუ არა → ნორმები ავსებს ერთმანეთს, გამოიყენე ორივე.
 
-2. 📌 ამონარიდი (Facts Extraction)
-   - ამოიღე რეალური ფაქტები CONTEXT-დან
-   - გამოიყენე EVIDENCE NOTES სექცია თუ CONTEXT-ში არსებობს
-   - არ დაამატო საკუთარი ინტერპრეტაცია ამ ნაწილში
+**ნაბიჯი 2 — PRIORITY RULES (იერარქია):**
 
-3. ⚖️ სამართლებრივი ანალიზი (Reasoning)
-   - შეადარე საქმეები
-   - ახსენი სასამართლოს მიდგომა
-   - მიუთითე მსგავსება/განსხვავება
+| პრინციპი | წესი | მაგალითი |
+|---|---|---|
+| **lex superior** | მაღალი იერარქია > დაბალი | კონსტიტუცია > კანონი > კანონქვემდებარე |
+| **lex specialis** | სპეციალური კანონი > ზოგადი | „სახ. ავტოპარკის კანონი" > „სამოქ. კოდექსი" |
+| **lex posterior** | ახალი კანონი > ძველი | 2020 კანონი > 2005 კანონი |
 
-4. 🧠 დასკვნა (Conclusion)
-   - მოკლე და მკაფიო პასუხი
-   - რა არის სამართლებრივი პოზიცია
+**კოლიზიის გადაწყვეტა:**
+- lex superior ყოველთვის მოქმედებს — დონეთა შორის არ არის გამონაკლისი
+- lex specialis vs lex posterior: **სპეციალური გამოიყენება, თუ:**
+  - ახალი ზოგადი კანონი სპეციალურს პირდაპირ არ გამორიცხავს (expressly)
+  - სპეციალური კანონი ჯერ კიდევ ძალაშია
+- lex posterior გამოიყენება მხოლოდ თუ: ერთი და იგივე სპეციფიკობის ორი კანონი ეწინააღმდეგება
 
-5. 📊 სანდოობა (Confidence)
-   - მაღალი / საშუალო / დაბალი
-   - ახსენი რატომ
+**ნაბიჯი 3 — MANDATORY DISCLOSURE:**
+კოლიზიის შემთხვევაში პასუხი **სავალდებულოდ** უნდა შეიცავდეს:
+```
+⚠️ სამართლებრივი კოლიზია: [კანონი A] vs [კანონი B]
+გამოყენებული პრინციპი: [lex specialis / lex posterior / lex superior]
+გამოყენებული ნორმა: [კანონი X], რადგან [მოკლე დასაბუთება]
+```
+
+❗ NEVER: "ორი კანონი ეწინააღმდეგება, ამიტომ ვერ ვუპასუხებ" — ყოველთვის გამოიყენე ინტერპრეტაციის წესი და მიიღე პოზიცია.
+❗ NEVER: ნორმების კოლიზია "ალბათ" ან "შეიძლება" ფრაზებით მოახსენო — მკაფიო, დასაბუთებული დასკვნა.
+
+────────────────────────
+📊 DEFAULT RESPONSE STRUCTURE
+────────────────────────
+
+⚠️ ეს არის DEFAULT სტრუქტურა find/summarize/compare კითხვებისთვის.
+ACTIVE MODE instruction (ქვემოთ) თუ სხვა სტრუქტურას გვთხოვს — იმას გამოიყენე.
+
+**1. ✅ დასკვნა და შეჯამება** — ALWAYS FIRST
+   - პირდაპირი, მკაფიო პასუხი შეკითხვაზე (2-5 წინადადება)
+   - ძირითადი სამართლებრივი პოზიცია
+
+**2. 📋 გამოყენებული წყაროები** — ONLY if material was retrieved:
+
+   ⚖️ **სასამართლო გადაწყვეტილებები** (თუ CONTEXT-ში გადაწყვეტილებები მოიძებნა):
+      - ჩამოთვალე: case_num | სასამართლო | წელი
+      - ყოველ საქმეზე: რა დაადგინა (1-2 წინადადება)
+      - 🔗 ლინკი
+
+   📕 **მაცნე / კანონმდებლობა** (თუ CONTEXT-ში matsne/law დოკუმენტები მოიძებნა):
+      - ჩამოთვალე: სათაური | ტიპი | სტატუსი
+      - შესაბამისი ნაწილი მოკლედ
+      - 🔗 ლინკი
+
+**3. ⚖️ სამართლებრივი ანალიზი** (თუ კომპლექსური კითხვაა):
+   - წყაროებზე დაყრდნობილი მსჯელობა
+
+❗ წყაროების ბლოკები დაამატე მხოლოდ თუ CONTEXT-ში ის მასალა მოიძებნა.
+❗ თუ მხოლოდ კანონები/მაცნე მოიძებნა — გადაწყვეტილებების ბლოკი არ ჩასვა.
 
 ────────────────────────
 📊 CONFIDENCE RULES
@@ -182,6 +238,10 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 
 {$modeInstruction}
 
+{$issueSection}
+
+{$glossaryBlock}
+
 ────────────────────────
 🚫 STRICT RULES
 ────────────────────────
@@ -192,6 +252,8 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 - არ აურიო საქმეები ერთმანეთში
 - ქართულ კითხვაზე → ქართულად; ინგლისურ კითხვაზე → ინგლისურად
 - follow-up კითხვებში გამოიყენე წინა კონტექსტი
+- ❌ NEVER დაწერო "სასამართლო პრაქტიკა აღიარებს" — ეს ჰალუცინაციაა თუ CONTEXT-ში კონკრეტული case არ გაქვს. დასაშვებია მხოლოდ: "[case_num] საქმეში სასამართლომ დაადგინა..." ან "📌 სასამართლო პრაქტიკა ბაზაში ვერ მოიძებნა"
+- ❌ NEVER გაიმეორო ერთი და იგივე ფაქტი სხვადასხვა პარაგრაფში
 
 ────────────────────────
 🎯 მთავარი მიზანი
@@ -258,44 +320,135 @@ INST,
             'explain' => <<<INST
 მომხმარებელს სურს სამართლებრივი საკითხის განმარტება.
 
-გამოიყენე IRAC სტრუქტურა:
+თუ კითხვა **ერთ** სამართლებრივ საკითხს ეხება — გამოიყენე IRAC:
 
-📌 **საკითხი:** განსაზღვრე კონკრეტული სამართლებრივი კითხვა
-⚖️ **ნორმა/პრინციპი:**
-   • 📋 რას ამბობს ბაზიდან მოძიებული სასამართლო პრაქტიკა?
-   • 💡 რომელი ზოგადი სამართლებრივი პრინციპი მოქმედებს? (თუ საჭიროა)
-🔍 **გამოყენება:** როგორ ვრცელდება ეს კონკრეტულ კითხვაზე?
-✅ **დასკვნა:** სამართლებრივი პასუხი
+📌 **საკითხი:** კონკრეტული სამართლებრივი კითხვა
+📕 **ნორმა:** CONTEXT-ის კანონი/მუხლი ან 💡 ზოგადი (მიუთითე წყარო)
+⚖️ **პრაქტიკა:** CONTEXT-ის case ან "📌 ბაზაში ვერ მოიძებნა"
+🔍 **გამოყენება:** კონკრეტულ სიტუაციაზე გამოყენება
+✅ **დასკვნა:** კონკრეტული პოზიცია
 
-პასუხი უნდა იყოს ლოგიკურად სტრუქტურირებული, არა მხოლოდ ტექსტის გამეორება.
+თუ კითხვა **რამდენიმე** სამართლებრივ საკითხს შეიცავს — გამოიყენე multi-IRAC:
+- ჩამოთვალე საკითხები (2-4)
+- თითოეულზე ცალ-ცალკე: ნორმა → პრაქტიკა → დასკვნა
+- საბოლოო სინთეზი
+
+❗ ნუ გაიმეორებ კითხვის ტექსტს — ამოიყვანე სამართლებრივი არსი.
+❗ ნუ იტყვი "სასამართლო პრაქტიკა აღიარებს" კონკრეტული case-ის გარეშე.
 INST,
 
             'advise' => <<<INST
-მომხმარებელს სურს პრაქტიკული სამართლებრივი ორიენტაცია.
+მომხმარებელი გთხოვს სამართლებრივი სიტუაციის შეფასებას.
 
-⚠️ ᲛᲜᲘᲨᲕᲜᲔᲚᲝᲕᲐᲜᲘ: შენ არ ხარ ადვოკატი. პასუხი არ არის იურიდიული კონსულტაცია.
+⚠️ OVERRIDE: გამოიყენე მხოლოდ ქვემოთ მოცემული სტრუქტურა. DEFAULT RESPONSE STRUCTURE უგულებელყავი.
 
-სტრუქტურა:
-1. **ვითარების გაგება:** მოკლედ ახსენი გასაგებ ენაზე, რა სიტუაციაა
-2. **პრაქტიკა:**
-   📋 რა ამბობს სასამართლო პრაქტიკა მსგავს სიტუაციებში?
-3. **ვარიანტები:** რა ნაბიჯები შეიძლება გადადგას მომხმარებელმა?
-4. **შეზღუდვა:**
-   ⚠️ "ეს ზოგადი ინფორმაციაა. კონკრეტული გადაწყვეტისთვის მიმართეთ კვალიფიციურ იურისტს."
+შენი ამოცანა: სამართლებრივი ანალიზი — არა "პასუხის ძებნა".
 
-ენა — მარტივი, გასაგები. ტექნიკური ტერმინები განმარტე.
+MANDATORY სტრუქტურა:
+
+**1. 📋 სიტუაციის შეჯამება** (2-3 წინადადება)
+   მხარეები, ფაქტები, სადავო საკითხი — ზუსტად და მოკლედ.
+   ნუ გაიმეორებ მომხმარებლის სიტყვებს — ამოიყვანე არსი.
+
+**2. ⚖️ სამართლებრივი საკითხები**
+   ჩამოთვალე 2-4 კონკრეტული legal question, რომელსაც ეს სიტუაცია წარმოშობს.
+   მაგ: "1. აქვს თუ არა X-ს შეწყვეტის უფლება? 2. არის პირობა Y სამართლებრივად მოქმედი?"
+
+**3. 🔍 ანალიზი** — თითოეული საკითხი ცალ-ცალკე:
+
+   **[საკითხი 1-ის სახელი]:**
+   - 📕 კანონი/ნორმა: [CONTEXT-ის matsne ან 💡 ზოგადი — მიუთითე წყარო]
+   - ⚖️ სასამართლო პრაქტიკა: [CONTEXT-ის case ან "📌 ბაზაში ვერ მოიძებნა"]
+   - → დასკვნა ამ საკითხზე: [კონკრეტული პოზიცია]
+
+   **[საკითხი 2-ის სახელი]:**
+   [იგივე სტრუქტურა]
+
+**4. 💡 სამართლებრივი შეფასება**
+   - რომელი მხარის პოზიცია უფრო ძლიერია და რატომ
+   - სამართლებრივი რისკები
+   - შესაძლო ნაბიჯები
+
+❗ ნუ გაიმეორებ ერთ და იმავე ფაქტს სხვადასხვა საკითხის ანალიზში.
+❗ ნუ იტყვი "სასამართლო პრაქტიკა აღიარებს" — კონკრეტული case ან "ვერ მოიძებნა".
+❗ "ეს ზოგადი ინფორმაციაა" ფრაზა ნუ გამოიყენე — მომხმარებელი იურისტია.
+INST,
+
+            'advocate' => <<<INST
+მომხმარებელი იურისტია. მისი პოზიცია შეიძლება სუსტი იყოს — ის ამის შესახებ იცის.
+მისი ამოცანაა: საუკეთესო სამართლებრივი არგუმენტის პოვნა.
+
+⚠️ OVERRIDE: გამოიყენე მხოლოდ ქვემოთ მოცემული სტრუქტურა.
+
+MANDATORY სტრუქტურა:
+
+**1. ⚖️ ობიექტური შეფასება** — ALWAYS FIRST, ALWAYS HONEST
+   "ამჟამინდელი პრაქტიკა: [რა ამბობს mainstream-ი]"
+   - მთავარი case-ები CONTEXT-იდან (authority score-ით)
+   - პოზიციის სიძლიერე/სისუსტე — პირდაპირ
+
+**2. 🔍 ბრძოლის წერტილები** — ყველა, რაც CONTEXT-შია
+   CONTEXT-ის მასალიდან ამოიყვანე:
+
+   **[ა] ვადის/ფაქტის alternative reading**
+   - შეიძლება ვადა სხვაგვარად ითვლება?
+   - ფაქტობრივი გარემოება განსხვავდება?
+
+   **[ბ] ⚠️ Minority opinion** (outlier flag-ის მქონე case-ები)
+   - წარმოადგინე ⚠️ label-ით
+   - "1 საქმე, სუსტი, მაგრამ არსებობს"
+   - ❗ NEVER გამოიყენო outlier ⚠️ label-ის გარეშე
+
+   **[გ] Distinguish — ფაქტობრივი განსხვავება**
+   - რით განსხვავდება შენი შემთხვევა წამგებიანი precedent-ისგან?
+   - "იმ საქმეში X იყო — ჩვენს შემთხვევაში Y"
+
+   **[დ] სხვა სამართლებრივი თეორია**
+   - შეიძლება სხვა norm-ი ვრცელდებოდეს?
+   - CONTEXT-ის კანონებიდან alternative basis
+
+   **[ე] ECHR / საკონსტიტუციო კუთხე** (თუ CONTEXT-ში არის)
+   - ადამ. უფლ. კუთხე: მუხლი 6 (სამართლიანი სასამ.)?
+   - საკონსტ. სასამ-ს პრაქტიკა?
+
+**3. 💡 სტრატეგია**
+   - პირველი ნაბიჯი: [ყველაზე ძლიერი კუთხე]
+   - სარეზერვო: [შემდეგი ვარიანტი]
+   - რისკი: [სად ყველაზე სუსტი ხარ]
+
+❗ fabrication = კატეგ. აკრძ. — მხოლოდ CONTEXT-ის case-ები
+❗ outlier case = ⚠️ label-ით — ყოველთვის
+❗ ობიექტური შეფასება = ყოველთვის პირველი, ყოველთვის გულწრფელი
+❗ "ეს ზოგადი ინფ-ია" ფრაზა ნუ გამოიყენე — მომხმარებელი პროფ. იურისტია
 INST,
 
             default => <<<INST
-ეს ზოგადი სამართლებრივი კითხვაა. გამოიყენე ყველაზე შესაფერისი სტრუქტურა
-კითხვის ტიპისა და ბაზიდან მოძიებული მასალის მიხედვით.
+ეს სამართლებრივი კითხვაა. გამოიყენე IRAC სტრუქტურა:
+
+📌 **საკითხი:** რა სამართლებრივ კითხვაზე პასუხობ?
+📕 **ნორმა:** რომელი კანონი/მუხლი ვრცელდება? (CONTEXT-იდან ან 💡)
+⚖️ **სასამართლო პრაქტიკა:** CONTEXT-ის case-ები ან "📌 ბაზაში ვერ მოიძებნა"
+🔍 **გამოყენება:** როგორ ვრცელდება ეს კონკრეტულ სიტუაციაზე?
+✅ **დასკვნა:** კონკრეტული პოზიცია
+
+❗ ნუ გაიმეორებ კითხვის ტექსტს — ამოიყვანე სამართლებრივი საკითხი.
+❗ ნუ იტყვი "სასამართლო პრაქტიკა აღიარებს" კონკრეტული case-ის გარეშე.
 INST,
         };
     }
 
-    private function buildConfidenceInstruction(ConfidenceResult $confidence): string
+    private function buildConfidenceInstruction(ConfidenceResult $confidence, array $sources = [], bool $hasMatsneResults = false): string
     {
         $explanation = $confidence->explanation;
+        $hasCourt = empty($sources) || in_array('court', $sources);
+
+        // When court is not selected, no court decisions is expected — don't flag it
+        if (!$hasCourt || ($confidence->label === 'none' && $hasMatsneResults)) {
+            $matsneNote = $hasMatsneResults
+                ? "RETRIEVAL STATUS: MATSNE/LEGISLATION MODE — გამოიყენე მხოლოდ CONTEXT-ში მოწოდებული მაცნეს/კანონმდებლობის დოკუმენტები. სასამართლო გადაწყვეტილებები არ ეძებება ამ რეჟიმში."
+                : "RETRIEVAL STATUS: MATSNE MODE — ძიება მოხდა კანონმდებლობის ბაზაში. შედეგები CONTEXT-ში. ზოგადი ცოდნა გამოიყენე მხოლოდ CONTEXT-ის შევსებისთვის.";
+            return $matsneNote;
+        }
 
         return match ($confidence->label) {
             'high' => <<<INST
@@ -306,31 +459,44 @@ INST,
 
             'medium' => <<<INST
 RETRIEVAL სტატუსი: საშუალო სანდოობა [{$explanation}]
-მოძიებული გადაწყვეტილებები სავარაუდოდ რელევანტურია, მაგრამ კავშირი ზუსტი არ არის.
-გამოიყენე ბაზა, მაგრამ მიუთითე: "ბაზაში მოძიებული გადაწყვეტილებები სრულად ზუსტ შესაბამისობაში
-არ არის კითხვასთან, თუმცა სავარაუდო კავშირი ასეთია..."
+ბაზიდან მოიძებნა გადაწყვეტილებები, მაგრამ კავშირი კითხვასთან ზუსტი შეიძლება არ იყოს.
+
+შენი ამოცანა:
+1. შეაფასე — CONTEXT-ის გადაწყვეტილებები ნამდვილად ეხება ამ კითხვას?
+   • თუ კი → გამოიყენე, კონკრეტულად აღნიშნე კავშირი
+   • თუ არა → სასამართლო გადაწყვეტილებების ბლოკი ნუ ჩასვი; გამოიყენე კანონმდებლობა/ზოგადი ცოდნა
+2. "სავარაუდო კავშირია" ფრაზა ნუ გაიმეორე — ობიექტური შეფასება გააკეთე
+3. ნუ იტყვი "სასამართლო პრაქტიკა აღიარებს" თუ CONTEXT-ში კონკრეტული case-ები არ გაქვს
+4. ნათლად განასხვავე: 📋 (ბაზიდან) vs 💡 (ზოგადი სამართლებრივი ცოდნა)
+5. თუ CONTEXT-ის გადაწყვეტილებები არ გამოიყენე → ბოლო წინადადება: "📌 ამ კონკრეტულ საკითხზე სასამართლო გადაწყვეტილება ბაზაში ვერ მოიძებნა"
 INST,
 
             'low' => <<<INST
 RETRIEVAL სტატუსი: დაბალი სანდოობა [{$explanation}]
 ⚠️ ANTI-HALLUCINATION GUARD ACTIVE
-მოძიებული მასალა სუსტ კავშირს ამყარებს. სავალდებულო ქცევა:
-1. პასუხის დასაწყისში წარწერა: "⚠️ შეზღუდული პრაქტიკა: ბაზაში პირდაპირი შესაბამისობა ვერ მოიძებნა."
-2. ნათლად განასხვავე: 📋 (ბაზიდან) vs 💡 (ზოგადი სამართლებრივი ცოდნა)
-3. ნუ გამოიყენებ არარელევანტური გადაწყვეტილებების ფაქტებს
-4. ბოლოში: "🔍 გირჩევ დახვეწილი ძებნა უფრო სპეციფიური ტერმინებით."
+მოძიებული სასამართლო მასალა სუსტ კავშირს ამყარებს ამ კითხვასთან.
+
+სავალდებულო ქცევა:
+1. CONTEXT-ის გადაწყვეტილებები ნუ გამოიყენებ — ისინი ამ კითხვაზე არ არის
+2. ნუ იტყვი "სასამართლო პრაქტიკა აღიარებს" — ეს ჰალუცინაციაა, თუ CONTEXT-ში კონკრეტული case-ი არ გაქვს
+3. უპასუხე კანონმდებლობის (CONTEXT) და ზოგადი სამართლებრივი ცოდნის საფუძველზე
+4. ნათლად განასხვავე: 📋 (ბაზიდან) vs 💡 (ზოგადი სამართლებრივი ცოდნა)
+5. ბოლო წინადადება (მხოლოდ ერთხელ): "📌 ამ კონკრეტულ საკითხზე სასამართლო გადაწყვეტილება ბაზაში ვერ მოიძებნა"
 INST,
 
             'none' => <<<INST
-RETRIEVAL სტატუსი: შედეგი არ მოიძებნა (NO_RESULTS)
+RETRIEVAL სტატუსი: სასამართლო გადაწყვეტილება ვერ მოიძებნა (NO_COURT_RESULTS)
 ⚠️ ANTI-HALLUCINATION GUARD: MAXIMUM LEVEL
-ბაზაში ამ კითხვასთან შესაბამისი გადაწყვეტილება ვერ მოიძებნა.
+სასამართლო ბაზაში ამ კითხვასთან შესაბამისი გადაწყვეტილება ვერ მოიძებნა.
 
 სავალდებულო ქცევა:
-1. პირდაპირ აცნობე: "⚠️ ბაზაში ამ კონკრეტულ თემაზე გადაწყვეტილება ვერ მოიძებნა."
-2. შეგიძლია გააგრძელო ზოგადი სამართლებრივი ცოდნის საფუძველზე — 💡 ნიშნით
-3. ნათლად განასხვავე: ეს არ არის სასამართლო პრაქტიკა, ეს არის ზოგადი სამართლებრივი ცოდნა
-4. გაფრთხილება: "⚠️ კონკრეტული სასამართლო პრაქტიკისთვის მიმართეთ ბაზას ან იურისტს."
+1. სასამართლო გადაწყვეტილებების ბლოკი საერთოდ ნუ ჩასვი
+2. პასუხის სტრუქტურა:
+   a) 📋 კანონმდებლობა (CONTEXT-იდან, თუ მოიძებნა) — შესაბამისი მუხლები, ნორმები
+   b) 💡 სამართლებრივი ანალიზი — ზოგადი პრინციპებით, ლოგიკურად
+   c) ბოლო წინადადება (მხოლოდ ერთხელ): "📌 ამ კონკრეტულ საკითხზე ქართული სასამართლო პრაქტიკა ჩვენს ბაზაში ვერ მოიძებნა"
+3. ნუ გაიმეორებ "ვერ მოიძებნა" ფრაზას მთელ პასუხში — მხოლოდ ბოლოს, ერთხელ
+4. პასუხი მაინც სასარგებლო და სრულყოფილი უნდა იყოს კანონმდებლობის საფუძველზე
 INST,
 
             default => '',
@@ -339,7 +505,7 @@ INST,
 
     // ── Context Block ─────────────────────────────────────────────────────────
 
-    private function buildContextBlock(array $decisions, int $totalFound = 0, string $mode = 'explain', array $lawResults = [], array $echrResults = []): string
+    private function buildContextBlock(array $decisions, int $totalFound = 0, string $mode = 'explain', array $lawResults = [], array $echrResults = [], array $matsneResults = [], array $euResults = [], array $germanResults = [], array $constCourtResults = []): string
     {
         $parts = [];
 
@@ -366,6 +532,122 @@ TEXT:
 BLOCK;
             }
             $parts[] = implode("\n\n", $lawBlock);
+        }
+
+        // ── Matsne documents block ────────────────────────────────────────────
+        if (!empty($matsneResults)) {
+            $matsneBlock = ["RETRIEVED MATSNE DOCUMENTS (Georgian Legislation):\n"];
+            foreach ($matsneResults as $i => $doc) {
+                $num      = $i + 1;
+                $active   = $doc['is_active'] ? 'მოქმედი' : 'ძველი ვერსია (კანონი შეიძლება ძალაშია)';
+                $docType  = $doc['doc_type'] ?? 'N/A';
+                $issuer   = $doc['issuer']   ?? 'N/A';
+                $years    = $doc['effective_from_year']
+                    ? ($doc['effective_from_year'] . ($doc['effective_to_year'] ? '–' . $doc['effective_to_year'] : '–დღეს'))
+                    : 'N/A';
+
+                $matsneBlock[] = <<<BLOCK
+--- MATSNE DOC #{$num} ---
+Title: {$doc['title']}
+Type: {$docType} | Issuer: {$issuer}
+Status: {$active} | Years: {$years}
+Similarity: {$doc['similarity']}
+URL: {$doc['url']}
+
+EXCERPT:
+{$doc['excerpt']}
+--- END MATSNE DOC #{$num} ---
+BLOCK;
+            }
+            $parts[] = implode("\n\n", $matsneBlock);
+        }
+
+        // ── EU documents block ────────────────────────────────────────────────
+        if (!empty($euResults)) {
+            $euBlock = ["RETRIEVED EU DOCUMENTS (EU Legislation & CJEU Case Law):\n"];
+            foreach ($euResults as $i => $doc) {
+                $num      = $i + 1;
+                $typeLabel = match ($doc['doc_type']) {
+                    'regulation' => 'EU Regulation',
+                    'directive'  => 'EU Directive',
+                    'decision'   => 'EU Decision',
+                    'judgment'   => 'CJEU Judgment',
+                    'order'      => 'CJEU Order',
+                    'opinion'    => 'CJEU Opinion',
+                    default      => strtoupper($doc['doc_type']),
+                };
+                $court = $doc['court'] ? "Court: {$doc['court']}" : '';
+                $caseNum = $doc['case_num'] ? "Case: {$doc['case_num']}" : '';
+
+                $euBlock[] = <<<BLOCK
+--- EU DOC #{$num} ---
+Type: {$typeLabel}
+Title: {$doc['title']}
+{$court}
+{$caseNum}
+Date: {$doc['doc_date']}
+Similarity: {$doc['similarity']}
+URL: {$doc['url']}
+
+EXCERPT:
+{$doc['excerpt']}
+--- END EU DOC #{$num} ---
+BLOCK;
+            }
+            $parts[] = implode("\n\n", $euBlock);
+        }
+
+        // ── German cases block ───────────────────────────────────────────────
+        if (!empty($germanResults)) {
+            $germanBlock = ["RETRIEVED GERMAN COURT DECISIONS (გერმანული სასამართლო პრაქტიკა):\n"];
+            foreach ($germanResults as $i => $doc) {
+                $num   = $i + 1;
+                $court = $doc['court_name'] ?? 'N/A';
+                $year  = $doc['date_year']  ?? 'N/A';
+                $level = $doc['level_of_appeal'] ?? '';
+
+                $germanBlock[] = <<<BLOCK
+--- GERMAN CASE #{$num} ---
+Court: {$court} ({$level})
+Year: {$year}
+Similarity: {$doc['similarity']}
+
+EXCERPT (Georgian translation):
+{$doc['excerpt']}
+--- END GERMAN CASE #{$num} ---
+BLOCK;
+            }
+            $parts[] = implode("\n\n", $germanBlock);
+        }
+
+        // ── Constitutional Court block ────────────────────────────────────────
+        if (!empty($constCourtResults)) {
+            $ccBlock = ["RETRIEVED GEORGIAN CONSTITUTIONAL COURT DECISIONS (საკონსტიტუციო სასამართლო):\n"];
+            foreach ($constCourtResults as $i => $doc) {
+                $num      = $i + 1;
+                $caseNum  = $doc['case_number'] ?? 'N/A';
+                $type     = $doc['decision_type'] ?? 'N/A';
+                $date     = $doc['decision_date'] ?? 'N/A';
+                $college  = $doc['college']       ?? '';
+                $respond  = $doc['respondent']    ?? '';
+                $result   = $doc['result']        ?? '';
+                $url      = $doc['url']           ?? '';
+
+                $ccBlock[] = <<<BLOCK
+--- CONST COURT #{$num} ---
+Case: {$caseNum} | Type: {$type} | Date: {$date}
+College: {$college}
+Respondent: {$respond}
+Result: {$result}
+Similarity: {$doc['score']}
+URL: {$url}
+
+EXCERPT:
+{$doc['excerpt']}
+--- END CONST COURT #{$num} ---
+BLOCK;
+            }
+            $parts[] = implode("\n\n", $ccBlock);
         }
 
         // ── ECHR cases block ──────────────────────────────────────────────────
@@ -401,7 +683,6 @@ BLOCK;
 
         // ── Court decisions block ─────────────────────────────────────────────
         if (empty($decisions)) {
-            $parts[] = "STATUS: NO_RESULTS\nმონაცემთა ბაზაში შესაბამისი გადაწყვეტილება ვერ მოიძებნა.";
             return implode("\n\n────────────────────────\n\n", $parts);
         }
 
@@ -433,10 +714,23 @@ BLOCK;
                 "URL: {$caseUrl}",
             ]));
 
-            // Quality flags notice
+            // Authority + quality flags
+            $flags = $d['quality_flags'] ?? [];
+            $authorityNote = '';
+            if (!empty($d['authority_details'])) {
+                $auth = $d['authority_details'];
+                $authorityNote = "\nAUTHORITY: court={$auth['court_score']} year={$auth['year_score']} joint={$auth['joint_bonus']} total={$auth['total']}";
+            }
+            $outlierNote = in_array('outlier', $flags)
+                ? "\n⚠️ OUTLIER: " . ($d['outlier_note'] ?? 'minority position') . " — გამოიყენე სიფრთხილით"
+                : '';
+            $trendNote = !empty($d['trend_note'])
+                ? "\n📈 " . $d['trend_note']
+                : '';
             $qualityNote = '';
-            if (!empty($d['quality_flags'])) {
-                $qualityNote = "\nQUALITY FLAGS: " . implode(', ', $d['quality_flags']);
+            $otherFlags = array_diff($flags, ['outlier', 'trend_shift']);
+            if (!empty($otherFlags)) {
+                $qualityNote = "\nQUALITY FLAGS: " . implode(', ', $otherFlags);
             }
 
             [$textToSend, $status] = $this->resolveTextStrategy($d, $count, $mode);
@@ -455,10 +749,14 @@ BLOCK;
                 $keyFactsSection = "\nKEY FACTS:\n- {$facts}";
             }
 
+            $combinedScore = isset($d['combined_score'])
+                ? " | Combined: {$d['combined_score']}"
+                : '';
+
             $blocks[] = <<<BLOCK
 --- DECISION #{$num} ---
 {$meta}
-Relevance Score: {$d['relevance_score']} | Chunks: {$d['chunk_count']} | Mode: {$status}{$qualityNote}{$keyFactsSection}{$evidenceSection}
+Relevance: {$d['relevance_score']}{$combinedScore} | Chunks: {$d['chunk_count']} | Mode: {$status}{$authorityNote}{$outlierNote}{$trendNote}{$qualityNote}{$keyFactsSection}{$evidenceSection}
 
 TEXT:
 {$textToSend}
@@ -534,15 +832,22 @@ BLOCK;
         ConfidenceResult $confidence = new ConfidenceResult(0.0, 'none', ''),
         array           $lawResults = [],
         array           $echrResults = [],
+        array           $matsneResults = [],
+        array           $euResults = [],
+        array           $germanResults = [],
+        array           $constCourtResults = [],
+        array           $sources = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        ?IssueList      $issueList = null,
     ): \Generator {
-        // TODO: remove after testing
+        set_time_limit(0);
+
         Log::info('OpenAILegalAnswerService: streamTokens called', [
             'model' => $this->model,
             'mode'  => $mode,
         ]);
 
-        $systemPrompt = $this->buildSystemPrompt($mode, $confidence);
-        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults);
+        $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion);
+        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults);
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
         $client = new GuzzleClient();
@@ -560,8 +865,10 @@ BLOCK;
                 'temperature' => $this->temperature,
                 'stream'      => true,
             ],
-            'stream'  => true,
-            'timeout' => $this->timeout,
+            'stream'          => true,
+            'connect_timeout' => 10,
+            'read_timeout'    => $this->timeout,
+            'timeout'         => 0,
         ]);
 
         $body   = $response->getBody();

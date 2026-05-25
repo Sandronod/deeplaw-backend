@@ -1,14 +1,16 @@
-import { Injectable } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { environment } from '../../../environments/environment';
 import { Chat } from '../models/chat.model';
 import { ChatMessage, SseEvent, SseStatusData, SseTokenData, SseDoneData, SseErrorData } from '../models/message.model';
+import { AuthService } from './auth.service';
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private base = environment.apiUrl;
+  private auth = inject(AuthService);
 
   constructor(private http: HttpClient) {}
 
@@ -40,6 +42,13 @@ export class ApiService {
       .pipe(map(r => r.data));
   }
 
+  getFullCaseById(caseId: number): Observable<{
+    case_id: number; case_type: string; case_num: string | null;
+    case_date: string | null; content: string; content_type: 'html' | 'text';
+  }> {
+    return this.http.get<any>(`${this.base}/cases/${caseId}`);
+  }
+
   getFullCase(type: string, caseId: number): Observable<{
     case_id: number; case_type: string; case_num: string | null;
     case_date: string | null; content: string; content_type: 'html' | 'text';
@@ -59,17 +68,19 @@ export class ApiService {
    * Emits SseEvent objects: status → token* → done | error.
    * The Observable completes after 'done' or 'error'.
    */
-  streamMessage(chatId: number, message: string): Observable<SseEvent> {
+  streamMessage(chatId: number, message: string, sources: string[] = ['court', 'matsne', 'eu', 'german', 'const_court']): Observable<SseEvent> {
     return new Observable<SseEvent>(observer => {
       const controller = new AbortController();
 
+      const token = this.auth.token();
       fetch(`${this.base}/chats/${chatId}/messages/stream`, {
         method:  'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type':  'application/json',
           'Accept':        'text/event-stream',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
-        body:   JSON.stringify({ message }),
+        body:   JSON.stringify({ message, sources }),
         signal: controller.signal,
       })
         .then(response => {

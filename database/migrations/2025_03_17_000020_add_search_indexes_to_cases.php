@@ -2,13 +2,19 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
+    protected $connection = 'pgvector';
+
     public function up(): void
     {
-        // pg_trgm — ILIKE-ს GIN index-ებისთვის საჭირო extension
-        DB::statement('CREATE EXTENSION IF NOT EXISTS pg_trgm');
+        DB::connection('pgvector')->statement('CREATE EXTENSION IF NOT EXISTS pg_trgm');
+
+        if (! Schema::connection('pgvector')->hasTable('cases')) {
+            return;
+        }
 
         // ── case_id btree ─────────────────────────────────────────────────────
         // WHERE case_id IN (...), GROUP BY case_id, ORDER BY case_id
@@ -43,12 +49,15 @@ return new class extends Migration
 
     public function down(): void
     {
-        DB::statement('DROP INDEX IF EXISTS idx_cases_case_id');
-        DB::statement('DROP INDEX IF EXISTS idx_cases_content_trgm');
-        DB::statement('DROP INDEX IF EXISTS idx_cases_case_num_trgm');
-        DB::statement('DROP INDEX IF EXISTS idx_cases_court');
-        DB::statement('DROP INDEX IF EXISTS idx_cases_chamber');
-        DB::statement('DROP INDEX IF EXISTS idx_cases_category');
-        DB::statement('DROP INDEX IF EXISTS idx_cases_case_date');
+        if (! Schema::connection('pgvector')->hasTable('cases')) {
+            return;
+        }
+        DB::connection('pgvector')->statement('DROP INDEX IF EXISTS idx_cases_case_id');
+        DB::connection('pgvector')->statement('DROP INDEX IF EXISTS idx_cases_content_trgm');
+        DB::connection('pgvector')->statement('DROP INDEX IF EXISTS idx_cases_case_num_trgm');
+        DB::connection('pgvector')->statement('DROP INDEX IF EXISTS idx_cases_court');
+        DB::connection('pgvector')->statement('DROP INDEX IF EXISTS idx_cases_chamber');
+        DB::connection('pgvector')->statement('DROP INDEX IF EXISTS idx_cases_category');
+        DB::connection('pgvector')->statement('DROP INDEX IF EXISTS idx_cases_case_date');
     }
 };

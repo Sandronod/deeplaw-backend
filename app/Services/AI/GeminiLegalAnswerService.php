@@ -4,6 +4,7 @@ namespace App\Services\AI;
 
 use App\Contracts\AnswerServiceInterface;
 use App\DTOs\ConfidenceResult;
+use App\DTOs\IssueList;
 use App\DTOs\LawResult;
 use GuzzleHttp\Client as GuzzleClient;
 use Illuminate\Support\Facades\Log;
@@ -39,6 +40,12 @@ class GeminiLegalAnswerService implements AnswerServiceInterface
         ConfidenceResult $confidence = new ConfidenceResult(0.0, 'none', ''),
         array            $lawResults = [],
         array            $echrResults = [],
+        array            $matsneResults = [],
+        array            $euResults = [],
+        array            $germanResults = [],
+        array            $constCourtResults = [],
+        array            $sources = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        ?IssueList       $issueList = null,
     ): string {
         [$text] = $this->callGemini($userQuestion, $decisions, $historyMessages, $totalFound, $mode, $confidence, $lawResults);
         return $text;
@@ -55,6 +62,12 @@ class GeminiLegalAnswerService implements AnswerServiceInterface
         ConfidenceResult $confidence = new ConfidenceResult(0.0, 'none', ''),
         array            $lawResults = [],
         array            $echrResults = [],
+        array            $matsneResults = [],
+        array            $euResults = [],
+        array            $germanResults = [],
+        array            $constCourtResults = [],
+        array            $sources = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        ?IssueList       $issueList = null,
     ): \Generator {
         [$text] = $this->callGemini($userQuestion, $decisions, $historyMessages, $totalFound, $mode, $confidence, $lawResults);
 

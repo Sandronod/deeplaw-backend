@@ -24,7 +24,9 @@ export class ChatService {
   readonly error        = signal<string | null>(null);
   /** Increments on every token — lets chat-thread re-evaluate scroll position. */
   readonly streamTick   = signal(0);
+  readonly sources      = signal<string[]>(['court', 'matsne', 'eu', 'german', 'const_court']);
 
+  readonly chatsLoading = signal(false);
   readonly hasChats     = computed(() => this.chats().length > 0);
   readonly activeChatId = computed(() => this.activeChat()?.id ?? null);
 
@@ -33,7 +35,10 @@ export class ChatService {
   // ── Chat management ───────────────────────────────────────────────────────
 
   loadChats(): void {
-    this.api.getChats().subscribe({
+    this.chatsLoading.set(true);
+    this.api.getChats().pipe(
+      finalize(() => this.chatsLoading.set(false))
+    ).subscribe({
       next: chats => this.chats.set(chats),
       error: ()   => this.error.set('ჩატების ჩატვირთვა ვერ მოხერხდა.'),
     });
@@ -137,7 +142,7 @@ export class ChatService {
     this.error.set(null);
 
     // 3. Subscribe to SSE stream
-    this.api.streamMessage(chat.id, text.trim()).subscribe({
+    this.api.streamMessage(chat.id, text.trim(), this.sources()).subscribe({
       next: sseEvent => {
         switch (sseEvent.event) {
 
@@ -165,9 +170,13 @@ export class ChatService {
                 ? {
                     ...m,
                     id:            d.message_id,
-                    citations:     d.citations,
-                    law_citations: d.law_citations  ?? [],
-                    echr_citations:d.echr_citations ?? [],
+                    citations:        d.citations,
+                    law_citations:    d.law_citations     ?? [],
+                    echr_citations:   d.echr_citations    ?? [],
+                    matsne_citations: d.matsne_citations  ?? [],
+                    eu_citations:     d.eu_citations      ?? [],
+                    german_citations:     d.german_citations      ?? [],
+                    const_court_citations: d.const_court_citations ?? [],
                     meta:          d.meta,
                     status:    'done' as const,
                   }

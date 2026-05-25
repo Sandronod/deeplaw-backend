@@ -1,14 +1,27 @@
 <?php
 
+use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\FullCaseController;
 use App\Http\Controllers\Api\LegalChatController;
 use Illuminate\Support\Facades\Route;
 
+// ── Auth ──────────────────────────────────────────────────────────────────────
+Route::post('/auth/register', [AuthController::class, 'register']);
+Route::post('/auth/login',    [AuthController::class, 'login']);
+Route::middleware('auth:sanctum')->group(function () {
+    Route::post('/auth/logout', [AuthController::class, 'logout']);
+    Route::get('/auth/me',      [AuthController::class, 'me']);
+});
+
+// ── Cases (public read) ───────────────────────────────────────────────────────
 Route::get('/cases/{type}/{caseId}', [FullCaseController::class, 'show'])
     ->where('type', 'civil|administrative')
     ->where('caseId', '[0-9]+');
 
-Route::prefix('chats')->group(function () {
+Route::get('/cases/{caseId}', [FullCaseController::class, 'showById'])
+    ->where('caseId', '[0-9]+');
+
+Route::middleware('auth:sanctum')->prefix('chats')->group(function () {
     Route::get('/',                                 [LegalChatController::class, 'index']);
     Route::post('/',                                [LegalChatController::class, 'store']);
     Route::get('/{chat}',                           [LegalChatController::class, 'show']);

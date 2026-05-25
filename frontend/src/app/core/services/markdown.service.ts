@@ -43,7 +43,13 @@ export class MarkdownService {
     // 7. Blockquotes
     s = s.replace(/^&gt;\s?(.+)$/gm, '<blockquote class="md-blockquote">$1</blockquote>');
 
-    // 8. Links — handle after HTML escape (URLs won't have &lt; etc.)
+    // 8. Links — handle after HTML escape
+    // Supreme Court fullcase links → internal in-app navigation
+    s = s.replace(
+      /\[([^\]]+)\]\(https?:\/\/(?:www\.)?supremecourt\.ge\/ka\/fullcase\/(\d+)\/\d*\)/g,
+      '<a href="/fullcase/$2" data-case-id="$2" class="md-link md-case-link">$1 ↗</a>'
+    );
+    // All other external links
     s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
       '<a href="$2" target="_blank" rel="noopener noreferrer" class="md-link">$1 ↗</a>'
     );

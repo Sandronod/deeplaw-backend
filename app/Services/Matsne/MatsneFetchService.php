@@ -21,7 +21,7 @@ class MatsneFetchService
      */
     public function fetchHtml(int $matsneId): string
     {
-        $url = self::BASE_URL . "/{$matsneId}/0";
+        $url = self::BASE_URL . "/{$matsneId}/0?publication=0";
 
         Log::info('MatsneFetchService: fetching', ['url' => $url]);
 
@@ -31,8 +31,9 @@ class MatsneFetchService
                 'Accept'     => 'text/html,application/xhtml+xml',
             ])
                 ->timeout(self::TIMEOUT)
-                ->retry(self::RETRIES, 5000, fn($e, $r) =>
-                    $r && in_array($r->status(), [500, 502, 503, 504])
+                ->retry(self::RETRIES, 5000, fn($e) =>
+                    $e instanceof \Illuminate\Http\Client\RequestException &&
+                    in_array($e->response->status(), [500, 502, 503, 504])
                 )
                 ->get($url);
 

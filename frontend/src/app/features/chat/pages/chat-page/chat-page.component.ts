@@ -6,12 +6,14 @@ import { ApiService } from '../../../../core/services/api.service';
 import { SidebarComponent } from '../../components/sidebar/sidebar.component';
 import { ChatThreadComponent } from '../../components/chat-thread/chat-thread.component';
 import { ChatInputComponent } from '../../components/chat-input/chat-input.component';
+import { CaseModalComponent } from '../../components/case-modal/case-modal.component';
 
 @Component({
   selector: 'app-chat-page',
   standalone: true,
-  imports: [CommonModule, SidebarComponent, ChatThreadComponent, ChatInputComponent],
+  imports: [CommonModule, SidebarComponent, ChatThreadComponent, ChatInputComponent, CaseModalComponent],
   template: `
+    <app-case-modal />
     <div class="flex h-screen overflow-hidden bg-white dark:bg-gray-900">
 
       <!-- ── Mobile backdrop ─────────────────────────────────────────────── -->

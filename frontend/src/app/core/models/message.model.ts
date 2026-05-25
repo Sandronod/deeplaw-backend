@@ -32,6 +32,61 @@ export interface LawCitation {
   url: string;
 }
 
+export interface MatsneCitation {
+  type: 'matsne';
+  matsne_id: number;
+  title: string;
+  doc_type: string | null;
+  issuer: string | null;
+  is_active: boolean;
+  effective_from_year: number | null;
+  effective_to_year: number | null;
+  excerpt: string;
+  similarity: number;
+  url: string;
+}
+
+export interface EuCitation {
+  type: 'eu';
+  cellar_id: string;
+  doc_type: string;
+  source: 'legislation' | 'case_law';
+  court: string | null;
+  case_num: string | null;
+  title: string | null;
+  doc_date: string | null;
+  excerpt: string;
+  similarity: number;
+  url: string | null;
+}
+
+export interface GermanCitation {
+  type: 'german';
+  case_id: number;
+  external_id: string | null;
+  court_name: string | null;
+  level_of_appeal: string | null;
+  jurisdiction: string | null;
+  date_year: number | null;
+  excerpt: string;
+  similarity: number;
+}
+
+export interface ConstCourtCitation {
+  type: 'const_court';
+  legal_id: number;
+  case_number: string | null;
+  case_name: string | null;
+  decision_type: string | null;
+  decision_date: string | null;
+  college: string | null;
+  respondent: string | null;
+  result: string | null;
+  excerpt: string;
+  similarity: number;
+  url: string;
+}
+
 /** Reserved for future ECHR integration */
 export interface EchrCitation {
   type: 'echr';
@@ -76,7 +131,11 @@ export interface ChatMessage {
   content: string;
   citations: Citation[];
   law_citations?: LawCitation[];
-  echr_citations?: EchrCitation[];   // reserved — future ECHR integration
+  echr_citations?: EchrCitation[];
+  matsne_citations?: MatsneCitation[];
+  eu_citations?: EuCitation[];
+  german_citations?: GermanCitation[];
+  const_court_citations?: ConstCourtCitation[];
   meta?: MessageMeta;
   created_at: string;
   // UI-only fields — not persisted
@@ -105,7 +164,11 @@ export interface SseDoneData {
   message_id: number;
   citations: Citation[];
   law_citations?: LawCitation[];
-  echr_citations?: EchrCitation[];  // reserved
+  echr_citations?: EchrCitation[];
+  matsne_citations?: MatsneCitation[];
+  eu_citations?: EuCitation[];
+  german_citations?: GermanCitation[];
+  const_court_citations?: ConstCourtCitation[];
   meta: MessageMeta;
 }
 

@@ -3,6 +3,7 @@
 namespace App\Contracts;
 
 use App\DTOs\ConfidenceResult;
+use App\DTOs\IssueList;
 
 interface AnswerServiceInterface
 {
@@ -18,6 +19,12 @@ interface AnswerServiceInterface
         ConfidenceResult $confidence       = new ConfidenceResult(0.0, 'none', ''),
         array            $lawResults       = [],
         array            $echrResults      = [],
+        array            $matsneResults    = [],
+        array            $euResults        = [],
+        array            $germanResults       = [],
+        array            $constCourtResults  = [],
+        array            $sources            = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        ?IssueList       $issueList          = null,
     ): string;
 
     /**
@@ -27,11 +34,17 @@ interface AnswerServiceInterface
     public function streamTokens(
         string           $userQuestion,
         array            $decisions,
-        array            $historyMessages  = [],
-        int              $totalFound       = 0,
-        string           $mode             = 'explain',
-        ConfidenceResult $confidence       = new ConfidenceResult(0.0, 'none', ''),
-        array            $lawResults       = [],
-        array            $echrResults      = [],
+        array            $historyMessages    = [],
+        int              $totalFound         = 0,
+        string           $mode               = 'explain',
+        ConfidenceResult $confidence         = new ConfidenceResult(0.0, 'none', ''),
+        array            $lawResults         = [],
+        array            $echrResults        = [],
+        array            $matsneResults      = [],
+        array            $euResults          = [],
+        array            $germanResults      = [],
+        array            $constCourtResults  = [],
+        array            $sources            = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        ?IssueList       $issueList          = null,
     ): \Generator;
 }

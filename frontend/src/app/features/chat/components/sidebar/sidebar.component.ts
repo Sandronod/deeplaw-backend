@@ -1,8 +1,9 @@
-import { Component, Output, EventEmitter, signal } from '@angular/core';
+import { Component, Output, EventEmitter, signal, inject } from '@angular/core';
 import { Router } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { ChatService } from '../../../../core/services/chat.service';
 import { SettingsService } from '../../../../core/services/settings.service';
+import { AuthService } from '../../../../core/services/auth.service';
 import { Chat } from '../../../../core/models/chat.model';
 
 @Component({
@@ -40,7 +41,14 @@ import { Chat } from '../../../../core/models/chat.model';
       <!-- ── Conversation list ─────────────────────────────────────────────── -->
       <nav class="flex-1 overflow-y-auto px-2 pb-2 space-y-0.5 scrollbar-sidebar">
 
-        @if (!chatService.hasChats()) {
+        @if (chatService.chatsLoading()) {
+          <div class="flex justify-center py-8">
+            <svg class="animate-spin w-5 h-5 text-gray-500" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-opacity="0.25"/>
+              <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            </svg>
+          </div>
+        } @else if (!chatService.hasChats()) {
           <p class="px-3 py-8 text-xs text-gray-600 text-center leading-relaxed">
             ჩატები არ არის.<br>
             <span class="text-gray-500">დაიწყეთ ახალი ჩატი.</span>
@@ -87,6 +95,29 @@ import { Chat } from '../../../../core/models/chat.model';
           </div>
         }
       </nav>
+
+      <!-- ── User & Logout ──────────────────────────────────────────────────── -->
+      <div class="shrink-0 border-t border-sidebar-border px-3 py-2.5
+                  flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2 min-w-0">
+          <div class="w-7 h-7 rounded-full bg-accent/20 flex items-center justify-center shrink-0">
+            <span class="text-accent text-xs font-bold">
+              {{ (auth.user()?.first_name?.[0] ?? '') + (auth.user()?.last_name?.[0] ?? '') }}
+            </span>
+          </div>
+          <span class="text-xs text-gray-400 truncate">{{ auth.fullName() }}</span>
+        </div>
+        <button (click)="auth.logout()" title="გამოსვლა"
+          class="shrink-0 p-1.5 rounded-lg text-gray-600 hover:text-red-400
+                 hover:bg-sidebar-hover transition-colors">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+        </button>
+      </div>
 
       <!-- ── Settings ──────────────────────────────────────────────────────── -->
       <div class="shrink-0 border-t border-sidebar-border">
@@ -167,6 +198,7 @@ export class SidebarComponent {
   @Output() close = new EventEmitter<void>();
 
   settingsOpen = signal(false);
+  auth = inject(AuthService);
 
   constructor(
     public chatService: ChatService,

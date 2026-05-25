@@ -1,7 +1,8 @@
-import { Component, Input, signal } from "@angular/core";
+import { Component, Input, signal, inject } from "@angular/core";
 import { CommonModule } from "@angular/common";
 import { ChatMessage } from "../../../../core/models/message.model";
 import { MarkdownService } from "../../../../core/services/markdown.service";
+import { CaseModalService } from "../../../../core/services/case-modal.service";
 import { CitationListComponent } from "../citation-list/citation-list.component";
 import { ConfidenceBadgeComponent } from "../confidence-badge/confidence-badge.component";
 import { MessageActionsComponent } from "../message-actions/message-actions.component";
@@ -82,6 +83,7 @@ import { MessageActionsComponent } from "../message-actions/message-actions.comp
                             <div
                                 class="md-content chat-text text-gray-800 dark:text-gray-100 break-words"
                                 [innerHTML]="renderedContent"
+                                (click)="handleContentClick($event)"
                             ></div>
 
                             @if (isStreaming) {
@@ -153,6 +155,10 @@ import { MessageActionsComponent } from "../message-actions/message-actions.comp
                                     [domesticCitations]="message.citations"
                                     [lawCitations]="message.law_citations ?? []"
                                     [echrCitations]="message.echr_citations ?? []"
+                                    [matsneCitations]="message.matsne_citations ?? []"
+                                    [euCitations]="message.eu_citations ?? []"
+                                    [germanCitations]="message.german_citations ?? []"
+                                    [constCourtCitations]="message.const_court_citations ?? []"
                                 />
                             </div>
                         }
@@ -172,6 +178,8 @@ export class MessageItemComponent {
     // Markdown memoization — avoids re-parsing on every CD tick during streaming
     private _cachedContent = "";
     private _cachedRendered = "";
+
+    private caseModal = inject(CaseModalService);
 
     constructor(private md: MarkdownService) {}
 
@@ -220,13 +228,26 @@ export class MessageItemComponent {
     get citationCount(): number {
         return (
             (this.message.citations?.length ?? 0) +
-            (this.message.law_citations?.length ?? 0) +
-            (this.message.echr_citations?.length ?? 0)
+            (this.message.echr_citations?.length ?? 0) +
+            (this.message.matsne_citations?.length ?? 0) +
+            (this.message.eu_citations?.length ?? 0) +
+            (this.message.german_citations?.length ?? 0) +
+            (this.message.const_court_citations?.length ?? 0)
         );
     }
 
     toggleCitations(): void {
         this.citationsVisible.update((v) => !v);
+    }
+
+    handleContentClick(event: MouseEvent): void {
+        const anchor = (event.target as HTMLElement).closest('a[data-case-id]');
+        if (!anchor) return;
+        const caseId = anchor.getAttribute('data-case-id');
+        if (caseId) {
+            event.preventDefault();
+            this.caseModal.open(+caseId);
+        }
     }
 
     get renderedContent(): string {

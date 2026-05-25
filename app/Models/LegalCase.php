@@ -47,6 +47,7 @@ class LegalCase extends Model
             SELECT
                 cc.id,
                 cm.id              AS case_id,
+                cm.source_id,
                 cm.case_num,
                 cm.dispute_subject,
                 cm.case_date,
@@ -91,6 +92,7 @@ class LegalCase extends Model
             SELECT DISTINCT ON (cm.id)
                 cc.id,
                 cm.id              AS case_id,
+                cm.source_id,
                 cm.case_num,
                 cm.dispute_subject,
                 cm.case_date,
@@ -146,6 +148,7 @@ class LegalCase extends Model
             SELECT
                 cc.id,
                 cc.case_id,
+                cm.source_id,
                 cc.chunk_index,
                 cc.content,
                 cm.case_num,

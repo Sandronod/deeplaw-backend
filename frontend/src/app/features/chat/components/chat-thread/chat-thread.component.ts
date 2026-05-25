@@ -15,9 +15,24 @@ import { MessageItemComponent } from '../message-item/message-item.component';
 
         <!-- ── Loading skeleton ──────────────────────────────────────────── -->
         @if (chatService.isLoading()) {
-          <div class="flex flex-col gap-8 max-w-3xl mx-auto px-4 pt-10 pb-6">
+          <div class="flex flex-col max-w-3xl mx-auto px-4 pt-10 pb-6 animate-fade-in">
+
+            <!-- Status label -->
+            <div class="flex items-center gap-2 mb-8 px-1">
+              <span class="flex gap-1">
+                @for (d of [0,1,2]; track d) {
+                  <span class="w-1.5 h-1.5 rounded-full bg-accent animate-bounce-dot"
+                        [style.animation-delay]="d * 0.15 + 's'"></span>
+                }
+              </span>
+              <span class="text-xs text-gray-400 dark:text-gray-500">
+                შეტყობინებები იტვირთება...
+              </span>
+            </div>
+
+            <!-- Skeleton rows -->
             @for (row of skeletonRows; track row.id) {
-              <div class="flex gap-3">
+              <div class="flex gap-3 mb-8">
                 <div class="w-8 h-8 rounded-full skeleton shrink-0 mt-0.5"></div>
                 <div class="flex-1 space-y-2.5 pt-1">
                   <div class="h-3 skeleton rounded-full" [style.width]="row.w1"></div>
@@ -26,6 +41,7 @@ import { MessageItemComponent } from '../message-item/message-item.component';
                 </div>
               </div>
             }
+
           </div>
         }
 

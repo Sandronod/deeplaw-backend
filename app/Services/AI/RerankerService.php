@@ -34,12 +34,18 @@ class RerankerService
      * @param  string  $query     Original user question
      * @param  array   $decisions Reconstructed decisions from retriever
      * @param  int     $topK      How many to keep after reranking
+     * @param  string  $mode      'advocate' reserves 1 slot for minority opinion
      * @return array   Reordered and truncated decisions
      */
-    public function rerank(string $query, array $decisions, int $topK = 5): array
+    public function rerank(string $query, array $decisions, int $topK = 5, string $mode = 'explain'): array
     {
         if (count($decisions) <= $topK) {
             return $decisions;
+        }
+
+        // advocate mode: outlier/minority case-ი სავალდ. შეინახე top-K-ში
+        if ($mode === 'advocate') {
+            return $this->rerankAdvocate($query, $decisions, $topK);
         }
 
         // Build lookup by case_id
@@ -154,5 +160,43 @@ PROMPT;
     {
         preg_match_all('/\b(\d{3,})\b/', $content, $m);
         return array_unique(array_map('intval', $m[1]));
+    }
+
+    /**
+     * Advocate rerank:
+     *  - 1 slot reserved for minority/outlier opinion (advocate_value flag)
+     *  - remaining slots filled by standard LLM rerank
+     */
+    private function rerankAdvocate(string $query, array $decisions, int $topK): array
+    {
+        // outlier case-ები გამოვყოთ
+        $outliers   = array_values(array_filter(
+            $decisions,
+            fn($d) => in_array('advocate_value', $d['quality_flags'] ?? [])
+        ));
+        $mainstream = array_values(array_filter(
+            $decisions,
+            fn($d) => !in_array('advocate_value', $d['quality_flags'] ?? [])
+        ));
+
+        // mainstream-ს ვარეინქავთ LLM-ით (topK-1 slot-ისთვის)
+        $mainstreamSlots = $topK - min(1, count($outliers));
+        $rankedMainstream = count($mainstream) <= $mainstreamSlots
+            ? $mainstream
+            : $this->rerank($query, $mainstream, $mainstreamSlots);
+
+        // ერთი outlier ბოლოს (context-ში minority opinion-ად)
+        $result = $rankedMainstream;
+        if (!empty($outliers)) {
+            $result[] = $outliers[0]; // ყველაზე რელევანტური outlier
+        }
+
+        Log::debug('Reranker: advocate mode', [
+            'mainstream' => count($rankedMainstream),
+            'outlier'    => !empty($outliers) ? 1 : 0,
+            'total'      => count($result),
+        ]);
+
+        return $result;
     }
 }

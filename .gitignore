@@ -33,3 +33,20 @@ frontend/.angular/
 
 # Misc
 cnt
+
+# Temp/debug scripts
+debug*.php
+diagnostic*.php
+reset_*.php
+compare_*.php
+fix_*.php
+test_*.php
+/first())
+/delete()
+/count()
+/count('case_id')
+/data_type
+/public/files.zip
+/public/files_extracted/
+storage/app/glossary_raw.json
+storage/app/glossary_enriched.json

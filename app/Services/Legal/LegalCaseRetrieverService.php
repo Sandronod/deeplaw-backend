@@ -312,6 +312,7 @@ class LegalCaseRetrieverService
 
             $decisions[] = [
                 'case_id'         => $caseId,
+                'source_id'       => $first->source_id ?? $caseId,
                 'case_num'        => $first->case_num,
                 'dispute_subject' => $first->dispute_subject,
                 'case_date'       => $first->case_date,

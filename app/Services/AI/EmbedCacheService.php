@@ -76,6 +76,12 @@ class EmbedCacheService
 
     private function cacheKey(string $text): string
     {
-        return 'embed_' . md5($text . config('openai.embedding_model', 'text-embedding-3-large'));
+        $provider = config('ai.provider', 'openai');
+        $model    = match ($provider) {
+            'ollama' => config('ollama.embedding_model', 'bge-m3'),
+            'gemini' => 'gemini-embedding',
+            default  => config('openai.embedding_model', 'text-embedding-3-large'),
+        };
+        return 'embed_' . md5($text . $model);
     }
 }

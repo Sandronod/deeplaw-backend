@@ -106,10 +106,14 @@ export class FullcasePageComponent implements OnInit {
   constructor(private route: ActivatedRoute, private api: ApiService) {}
 
   ngOnInit(): void {
-    const type   = this.route.snapshot.paramMap.get('type')   ?? '';
+    const type   = this.route.snapshot.paramMap.get('type');
     const caseId = Number(this.route.snapshot.paramMap.get('caseId'));
 
-    this.api.getFullCase(type, caseId).subscribe({
+    const request$ = type
+      ? this.api.getFullCase(type, caseId)
+      : this.api.getFullCaseById(caseId);
+
+    request$.subscribe({
       next: data => {
         this.caseData.set(data);
         this.isLoading.set(false);
