@@ -587,16 +587,26 @@ class LegalChatOrchestratorService
         $ollamaCacheKey  = 'ollama_embed_' . md5($ollamaText . config('ollama.embedding_model', 'bge-m3'));
         $ollamaEmbedding = Cache::remember($ollamaCacheKey, 86400, fn() => $this->ollamaEmbedder->embed($ollamaText));
 
+        // Fingerprint embedding — long queries (>500 chars) may be pasted decision text.
+        // Embed the first 300 chars to detect near-duplicate chunks at threshold 0.90.
+        $fingerprintEmbedding = null;
+        if (mb_strlen($userQuestion) > 500) {
+            $fpText = mb_substr($userQuestion, 0, 300);
+            $fpKey  = 'fp_embed_' . md5($fpText . config('ollama.embedding_model', 'bge-m3'));
+            $fingerprintEmbedding = Cache::remember($fpKey, 86400, fn() => $this->ollamaEmbedder->embed($fpText));
+        }
+
         $strategy = $parsedQuery->hasCaseNumber() ? 'case_number+vector' : 'vector+metadata';
         $debugFlags['retrieval_strategy'] = $strategy;
 
         $retrieval = $this->retriever->retrieve(
-            rawEmbedding:  $ollamaEmbedding,
-            searchTerms:   $parsedQuery->terms,
-            originalQuery: $userQuestion,
-            hydeEmbedding: null,
-            parsed:        $parsedQuery,
-            caseType:      $triage->caseTypeFilter(),
+            rawEmbedding:         $ollamaEmbedding,
+            searchTerms:          $parsedQuery->terms,
+            originalQuery:        $userQuestion,
+            hydeEmbedding:        null,
+            parsed:               $parsedQuery,
+            caseType:             $triage->caseTypeFilter(),
+            fingerprintEmbedding: $fingerprintEmbedding,
         );
 
         return [$retrieval, $parsedQuery, $debugFlags, $triage->searchQuery, $ollamaEmbedding];

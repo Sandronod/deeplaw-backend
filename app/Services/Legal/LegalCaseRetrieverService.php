@@ -27,6 +27,7 @@ class LegalCaseRetrieverService
         ?ParsedQuery $parsed       = null,
         ?string     $caseType     = null,
         bool        $skipCaseVector = false,
+        ?array      $fingerprintEmbedding = null,
     ): RetrievalResult {
         $chunkLimit = config('openai.retrieval_chunk_limit', 20);
         $caseLimit  = config('openai.retrieval_case_limit', 3);
@@ -54,6 +55,21 @@ class LegalCaseRetrieverService
                 'pattern' => $caseNumPattern,
                 'found'   => $caseNumChunks->count(),
             ]);
+        }
+
+        // ── 0c. Fingerprint search — near-duplicate detection for pasted text ──
+        // When the user pastes a long decision excerpt, the first 300 chars are
+        // embedded separately and searched at threshold 0.90. A hit means the
+        // exact (or near-identical) chunk is in the DB — surface that case first.
+        $fingerprintChunks = collect();
+        if (!empty($fingerprintEmbedding)) {
+            $fingerprintChunks = LegalCase::vectorSearch($fingerprintEmbedding, 5, 0.90, null, $caseType);
+            if ($fingerprintChunks->isNotEmpty()) {
+                Log::debug('Retriever: fingerprint hit', [
+                    'cases' => $fingerprintChunks->pluck('case_id')->unique()->count(),
+                    'max'   => $fingerprintChunks->max('similarity'),
+                ]);
+            }
         }
 
         // ── 1. Vector search — skipped when provider has no embeddings ───────
@@ -121,9 +137,24 @@ class LegalCaseRetrieverService
             }
         }
 
-        // ── 5. Four-way merge: case_num (1.0) > chunk-vector > case-vector > metadata (0.60) ────
+        // ── 5. Five-way merge: fingerprint (1.0) > case_num (1.0) > chunk-vector > case-vector > metadata (0.60) ──
         $matchedChunks   = $vectorChunks;
         $existingCaseIds = $vectorChunks->pluck('case_id')->unique()->toArray();
+
+        if ($fingerprintChunks->isNotEmpty()) {
+            $newFpIds = array_diff(
+                $fingerprintChunks->pluck('case_id')->unique()->toArray(),
+                $existingCaseIds
+            );
+            if (!empty($newFpIds)) {
+                $extra = $fingerprintChunks->whereIn('case_id', $newFpIds)->map(function ($c) {
+                    $c->similarity = 1.0;
+                    return $c;
+                });
+                $matchedChunks   = $matchedChunks->concat($extra);
+                $existingCaseIds = array_merge($existingCaseIds, $newFpIds);
+            }
+        }
 
         if ($caseNumChunks->isNotEmpty()) {
             $newCnIds = array_diff(
