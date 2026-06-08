@@ -138,7 +138,7 @@ PROMPT;
             $date     = $d['case_date'] instanceof \Carbon\Carbon
                 ? $d['case_date']->format('Y-m-d')
                 : ($d['case_date'] ?? 'N/A');
-            $excerpt  = mb_substr($d['excerpt'] ?? $d['full_text'] ?? '', 0, 350);
+            $excerpt  = mb_substr($d['excerpt'] ?? $d['full_text'] ?? '', 0, 700);
             $lines   .= sprintf(
                 "[ID:%d] %s | %s | %s | %s | %s\n%s\n\n",
                 $d['case_id'],

@@ -9,6 +9,9 @@ return [
     'chat_model'        => env('OPENAI_CHAT_MODEL', 'gpt-4.1'),
     // Lightweight model for keyword extraction (10x cheaper than chat_model)
     'extraction_model'  => env('OPENAI_EXTRACTION_MODEL', 'gpt-4.1-mini'),
+    // High-reasoning judge model for LLM-as-Judge evaluation
+    'judge_model'       => env('OPENAI_JUDGE_MODEL', 'o4-mini'),
+    'judge_enabled'     => (bool) env('EVAL_JUDGE_ENABLED', false),
     'timeout'           => (int) env('OPENAI_TIMEOUT', 60),
     'max_tokens'        => (int) env('OPENAI_MAX_TOKENS', 4096),
     'temperature'       => (float) env('OPENAI_TEMPERATURE', 0.2),

@@ -25,6 +25,8 @@ class LegalCaseRetrieverService
         string      $originalQuery = '',
         ?array      $hydeEmbedding = null,
         ?ParsedQuery $parsed       = null,
+        ?string     $caseType     = null,
+        bool        $skipCaseVector = false,
     ): RetrievalResult {
         $chunkLimit = config('openai.retrieval_chunk_limit', 20);
         $caseLimit  = config('openai.retrieval_case_limit', 3);
@@ -61,10 +63,11 @@ class LegalCaseRetrieverService
 
         if ($useVector) {
             foreach ($thresholds as $minScore) {
-                $rawChunks = LegalCase::vectorSearch($rawEmbedding, $chunkLimit, $minScore, $year);
+                $rawChunks = LegalCase::vectorSearch($rawEmbedding, $chunkLimit, $minScore, $year, $caseType);
                 if ($rawChunks->isNotEmpty()) {
                     Log::debug('Retriever: raw vector search', [
                         'threshold' => $minScore,
+                        'case_type' => $caseType,
                         'found'     => $rawChunks->count(),
                     ]);
                     break;
@@ -76,7 +79,7 @@ class LegalCaseRetrieverService
         $hydeChunks = collect();
         if ($useVector && $hydeEmbedding !== null) {
             foreach ($thresholds as $minScore) {
-                $hydeChunks = LegalCase::vectorSearch($hydeEmbedding, $chunkLimit, $minScore, $year);
+                $hydeChunks = LegalCase::vectorSearch($hydeEmbedding, $chunkLimit, $minScore, $year, $caseType);
                 if ($hydeChunks->isNotEmpty()) {
                     Log::debug('Retriever: HyDE vector search', [
                         'threshold' => $minScore,
@@ -91,17 +94,34 @@ class LegalCaseRetrieverService
         $vectorChunks = $this->mergeChunkResults($rawChunks, $hydeChunks);
 
         // ── 4. Metadata search — uses searchTerms or judge filter ─────────────
-        $metaChunks  = collect();
-        $metaTerms   = $parsed?->judge ?? $searchTerms;
+        $metaChunks     = collect();
+        $metaTerms      = $parsed?->judge ?? $searchTerms;
+        $includeContent = $parsed?->judge !== null; // content ILIKE only for judge name lookups
         if (!empty($metaTerms)) {
-            $metaChunks = LegalCase::metadataSearch($metaTerms, 30, $year);
+            $metaChunks = LegalCase::metadataSearch($metaTerms, 30, $year, $caseType, $includeContent);
             Log::debug('Retriever: metadata search', [
-                'terms' => $metaTerms,
-                'found' => $metaChunks->count(),
+                'terms'          => $metaTerms,
+                'include_content'=> $includeContent,
+                'case_type'      => $caseType,
+                'found'          => $metaChunks->count(),
             ]);
         }
 
-        // ── 5. Three-way merge: case_num (1.0) > vector > metadata (0.60) ────
+        // ── 4b. Case-level embedding search (concept-level) ───────────────────
+        // Searches court_cases.case_embedding (bge-m3 over legal_issue + articles).
+        // Finds cases where the legal concept matches even if raw chunk text doesn't.
+        $caseChunks = collect();
+        if ($useVector && !empty($rawEmbedding) && !$skipCaseVector) {
+            $caseChunks = LegalCase::caseEmbeddingSearch($rawEmbedding, 10, 0.45, $caseType);
+            if ($caseChunks->isNotEmpty()) {
+                Log::debug('Retriever: case-level embedding search', [
+                    'found'     => $caseChunks->count(),
+                    'case_type' => $caseType,
+                ]);
+            }
+        }
+
+        // ── 5. Four-way merge: case_num (1.0) > chunk-vector > case-vector > metadata (0.60) ────
         $matchedChunks   = $vectorChunks;
         $existingCaseIds = $vectorChunks->pluck('case_id')->unique()->toArray();
 
@@ -118,6 +138,19 @@ class LegalCaseRetrieverService
                 $matchedChunks   = $matchedChunks->concat($extra);
                 $existingCaseIds = array_merge($existingCaseIds, $newCnIds);
             }
+        }
+
+        if ($caseChunks->isNotEmpty()) {
+            $newCaseIds = array_diff(
+                $caseChunks->pluck('case_id')->unique()->toArray(),
+                $existingCaseIds
+            );
+            // Concat ALL case-vector results, not just new ones.
+            // For cases already found by chunk-vector, the case_embedding similarity
+            // becomes an additional data point: raises max_sim when case_sim > chunk_sim,
+            // and lowers avg_sim for noise cases where chunk_sim > case_sim.
+            $matchedChunks   = $matchedChunks->concat($caseChunks);
+            $existingCaseIds = array_merge($existingCaseIds, $newCaseIds);
         }
 
         if ($metaChunks->isNotEmpty()) {
@@ -178,10 +211,11 @@ class LegalCaseRetrieverService
             ->toArray();
 
         Log::debug('Retriever: complete', [
-            'candidates'  => count($topCaseIds),
-            'chunks'      => $allChunks->count(),
-            'hyde_used'   => $hydeEmbedding !== null,
-            'dual_chunks' => $hydeChunks->count(),
+            'candidates'       => count($topCaseIds),
+            'chunks'           => $allChunks->count(),
+            'hyde_used'        => $hydeEmbedding !== null,
+            'dual_chunks'      => $hydeChunks->count(),
+            'case_level_hits'  => $caseChunks->count(),
         ]);
 
         return new RetrievalResult(

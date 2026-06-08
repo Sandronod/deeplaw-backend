@@ -5,6 +5,9 @@ namespace App\Services\AI;
 use App\DTOs\ConfidenceResult;
 use App\DTOs\IssueList;
 use App\DTOs\LawResult;
+use App\DTOs\TriageResult;
+use App\Services\AI\CitationVerifierService;
+use App\Services\AI\LegalRuleExtractorService;
 use App\Services\Legal\LegalGlossaryService;
 use GuzzleHttp\Client as GuzzleClient;
 use Illuminate\Http\Client\RequestException;
@@ -21,8 +24,11 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
     private int    $maxTokens;
     private float  $temperature;
 
-    public function __construct(private readonly LegalGlossaryService $glossary)
-    {
+    public function __construct(
+        private readonly LegalGlossaryService       $glossary,
+        private readonly CitationVerifierService    $citationVerifier,
+        private readonly LegalRuleExtractorService  $ruleExtractor,
+    ) {
         $this->apiKey      = config('openai.api_key');
         $this->model       = config('openai.chat_model', 'gpt-4.1');
         $this->baseUrl     = config('openai.base_url', 'https://api.openai.com/v1');
@@ -59,9 +65,12 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         array           $constCourtResults = [],
         array           $sources = ['court', 'matsne', 'eu', 'german', 'const_court'],
         ?IssueList      $issueList = null,
+        ?TriageResult   $triage = null,
+        array           $extractedRules = [],
     ): string {
-        $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion);
-        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults);
+        $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion, $triage);
+        $rulesBlock   = $this->ruleExtractor->buildPromptBlock($extractedRules);
+        $contextBlock = $rulesBlock . ($rulesBlock ? "\n\n" : '') . $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults);
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
         try {
@@ -108,15 +117,21 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 
     // ── System Prompt ─────────────────────────────────────────────────────────
 
-    private function buildSystemPrompt(string $mode, ConfidenceResult $confidence, array $sources = [], bool $hasMatsneResults = false, ?IssueList $issueList = null, string $userQuestion = ''): string
+    private function buildSystemPrompt(string $mode, ConfidenceResult $confidence, array $sources = [], bool $hasMatsneResults = false, ?IssueList $issueList = null, string $userQuestion = '', ?TriageResult $triage = null): string
     {
         $modeInstruction    = $this->buildModeInstruction($mode);
         $confidenceSection  = $this->buildConfidenceInstruction($confidence, $sources, $hasMatsneResults);
         $issueSection       = ($issueList?->isComplex) ? $issueList->toPromptBlock() : '';
         $glossaryBlock      = $userQuestion ? $this->glossary->buildPromptBlock($userQuestion, 8) : '';
+        $domainContext      = $this->buildDomainContextBlock($triage);
+        $statutoryRules     = $this->buildStatutoryRulesBlock($triage);
 
         return <<<PROMPT
 შენ ხარ პროფესიონალი იურიდიული ასისტენტი (Legal Copilot), რომელიც ეხმარება იურისტებს სასამართლო პრაქტიკის ანალიზში.
+
+{$domainContext}
+
+{$statutoryRules}
 
 ────────────────────────
 🧠 CORE PRINCIPLE
@@ -136,7 +151,12 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 📚 ცოდნის პრიორიტეტი (STRICT)
 ────────────────────────
 
-1. RETRIEVED LEGISLATION (მოწოდებული კანონები/მუხლები) — თუ არსებობს
+1. RETRIEVED LEGISLATION — SPECIFIC ARTICLES (📌 explicit / 💡 concept-injected)
+   ეს არის კონკრეტული მუხლების ტექსტი ბაზიდან. **სავალდებულოა გამოიყენო.**
+   📌 explicit citation = მომხმარებელმა პირდაპირ დაასახელა ეს მუხლი
+   💡 concept-injected = სისტემამ ავტომატ. ამოიცნო, რომ ეს მუხლი რელევანტურია
+   → ორივე შემთხვევაში: წაიკითხე, გაანალიზე, გამოიყენე
+
 2. RETRIEVED COURT DECISIONS (ქართული სასამართლო გადაწყვეტილებები) — თუ არსებობს
 3. RETRIEVED ECHR CASES (ადამიანის უფლებათა ევროპული სასამართლო) — თუ არსებობს
 4. ზოგადი სამართლებრივი ცოდნა
@@ -243,10 +263,27 @@ ACTIVE MODE instruction (ქვემოთ) თუ სხვა სტრუქ
 {$glossaryBlock}
 
 ────────────────────────
+✅ CONCLUSION RULES (სავალდებულო)
+────────────────────────
+
+**დასკვნა ყოველთვის კონკრეტული უნდა იყოს:**
+- ✅ "სარჩელი დასაშვებია / არ არის დასაშვები"
+- ✅ "ხანდაზმულობა გასულია / არ გასულა — [X წელი + [თარიღი]]"
+- ✅ "გარიგება ბათილია / ნამდვილია სკ [X] მუხლის საფუძველზე"
+- ✅ "მხარეს აქვს / არ აქვს უფლება — [კანონი + მიზეზი]"
+
+❌ NEVER დაწერო:
+- "შეიძლება ბათილი იყოს" → "ბათილია, რადგან..."
+- "სავარაუდოდ ვადა გასულია" → "ვადა გასულია: [თარიღი + გაანგარიშება]"
+- "ეს კომპლექსური საკითხია" → ეს არ არის დასკვნა
+- "კონკრეტული შემთხვევიდან გამომდინარე..." → მიიღე პოზიცია
+
+❗ თუ ფაქტები არ კმარა — **ამის შესახებ პირდაპირ თქვი** და მოითხოვე კონკრეტული ინფო, ნუ "ბუნდოვნობ".
+
+────────────────────────
 🚫 STRICT RULES
 ────────────────────────
 
-- არ დაწერო "შეიძლება", "ალბათ" — თუ არ გაქვს საფუძველი CONTEXT-დან
 - არ გამოიყენო ინფორმაცია რომელიც CONTEXT-ში არ არის
 - არ შეცვალო სასამართლოს გადაწყვეტილება
 - არ აურიო საქმეები ერთმანეთში
@@ -266,9 +303,142 @@ ACTIVE MODE instruction (ქვემოთ) თუ სხვა სტრუქ
 PROMPT;
     }
 
+    private function buildDomainContextBlock(?TriageResult $triage): string
+    {
+        if (!$triage || $triage->isChatOnly()) {
+            return '';
+        }
+
+        $caseTypeLabel = match ($triage->caseType) {
+            'civil'          => 'სამოქალაქო სამართალი',
+            'criminal'       => 'სისხლის სამართალი',
+            'administrative' => 'ადმინისტრაციული სამართალი',
+            default          => null,
+        };
+
+        $lines = ["────────────────────────\n🔬 LEGAL DOMAIN CONTEXT (automated triage)\n────────────────────────"];
+
+        if ($caseTypeLabel) {
+            $lines[] = "სამართლის ტიპი: **{$caseTypeLabel}**";
+            if ($triage->caseType === 'criminal') {
+                $lines[] = "⚠️ სისხლის სამართლის საქმე — სამოქალაქო ან ადმინისტრაციული სამართლის ნორმები არ გამოიყენო";
+            } elseif ($triage->caseType === 'civil') {
+                $lines[] = "⚠️ სამოქალაქო სამართლის საქმე — სისხლის სამართლის ნორმები არ გამოიყენო";
+            }
+        }
+
+        if (!empty($triage->domains)) {
+            $lines[] = "სფეროები: " . implode(', ', $triage->domains);
+        }
+
+        if ($triage->isComplex) {
+            $lines[] = "კომპლექსური საკითხი — multi-IRAC სტრუქტურა სავალდებულოა";
+        }
+
+        if ($triage->temporalYear !== null) {
+            $lines[] = "დროის კონტექსტი: კითხვა ეხება **{$triage->temporalYear} წელს** — ნორმები ფილტრირებულია ამ წლის მიხედვით";
+        } else {
+            $lines[] = "დროის კონტექსტი: კითხვაში კონკრეტული წელი ვერ მოიძებნა — ვარაუდობს მიმდინარე წელი (" . date('Y') . ")";
+        }
+
+        $lines[] = "────────────────────────";
+
+        return implode("\n", $lines);
+    }
+
+    private function buildStatutoryRulesBlock(?TriageResult $triage): string
+    {
+        if (!$triage || $triage->isChatOnly()) {
+            return '';
+        }
+
+        $rules = [];
+
+        $domains  = $triage->domains ?? [];
+        $caseType = $triage->caseType ?? '';
+
+        $hasCivilProc = in_array('civil_procedure', $domains) || $caseType === 'civil';
+        $hasCivilLaw  = in_array('civil_law', $domains)       || $caseType === 'civil';
+        $hasCriminal  = in_array('criminal', $domains)        || $caseType === 'criminal';
+        $hasAdmin     = in_array('administrative', $domains)  || $caseType === 'administrative';
+        $hasLabor     = in_array('labor', $domains);
+
+        if ($hasCivilProc) {
+            $rules[] = <<<RULES
+📋 სამოქალაქო საპროცესო სამართლი — ძირითადი ზღვრები (სსკ):
+• მაგისტრატი მოსამართლე: სარჩელის ფასი ≤ 50 000 ₾ (სსკ მე-9 მუხლი)
+• სარჩელის ფასი > 50 000 ₾ → რაიონული სასამართლო
+• სსკ 21-ე მუხლი — განსჯადობაზე შეთანხმება:
+  ✅ ვრცელდება: ტერიტორიული განსჯადობა (სად განიხილოს)
+  ❌ არ ვრცელდება: საგნობრივი განსჯადობა (ვინ განიხილოს — მაგ. მაგ. მოს. vs რაიონული)
+  → შეგებებული სარჩელის შეტანა ≠ საგნობრივ განსჯადობაზე შეთანხმება
+• სსკ 22-ე მუხლი: განსჯადობის წესების დაცვით მიღებული საქმე — ბოლომდე იმ სასამართლოს მიერ
+• სააპ. გასაჩ. ვადა: გადაწყვ. მიღ. დღიდან 2 კვ. (სსკ 369)
+• საკას. გასაჩ. ვადა: სააპ. გადაწყვ-დან 1 თვე (სსკ 396)
+RULES;
+        }
+
+        // Civil law substantive rules intentionally omitted — SemanticArticleRetriever
+        // fetches the authoritative matsne_chunks_v2 articles for every specific question.
+        // Hardcoding article facts here does not scale and risks becoming stale.
+
+        if ($hasCriminal) {
+            $rules[] = <<<RULES
+📋 სისხლის სამართალი — ძირითადი პრინციპები:
+• უდანაშაულობის პრეზ.: ბრალდ. უდანაშ-ია, სანამ არ დამტ. (სსსკ მე-3 მუხ.)
+• in dubio pro reo: ეჭვი — ბრალდ. სასარგ.
+• მტკ. ტვირთი: პროკ.-ზე (ბრალდ. ვალ. დაამტ.)
+• ნასამართლობა: გამამტ. განაჩ. → ნასამ. ინახება (სსსკ 308)
+RULES;
+        }
+
+        if ($hasAdmin) {
+            $rules[] = <<<RULES
+📋 ადმინისტრაციული სამართალი — ძირითადი ვადები (ზაკ/სასამ. კოდ.):
+• ადმ. საჩ. ვადა: ადმ. ორგ-ის შეს. შეტყ-დან 1 თვე (ზოგ. ადმ. კოდ. 177)
+• სასამართლო გასაჩ. ვადა: 3 თვე (ადმ. სამ. კოდ. მე-22)
+• ადმ. ორგ. ვალ.: ახსნ-განმ. ვადა — 10 სამ. დღე
+RULES;
+        }
+
+        if ($hasLabor) {
+            $rules[] = <<<RULES
+📋 შრომის სამართალი — ძირითადი ვადები:
+• სამ.-დან გათ.-ის გასაჩ. ვადა: 30 კალ. დღე (შრ. კოდ. 38)
+• შრ. ხელშ. ბათ-ობა: სსკ-ის ნორმები ვრცელდება
+• კომპ.-ის მოთხ. ვადა: ხანდაზმ. 3 წ. (სსკ 128)
+RULES;
+        }
+
+        if (empty($rules)) {
+            return '';
+        }
+
+        $body = implode("\n\n", $rules);
+
+        return <<<BLOCK
+────────────────────────
+⚖️ STATUTORY RULES — ავტ. ჩართული ამ domain-ისთვის
+────────────────────────
+{$body}
+⚠️ ეს წესები ყოველთვის შეამოწმე — კითხვაში ხსენებული ზღვრები, ვადები და ნორმები სავალდ. გაანალიზე.
+────────────────────────
+BLOCK;
+    }
+
     private function buildModeInstruction(string $mode): string
     {
         return match ($mode) {
+            'chat' => <<<INST
+ეს მეგობრული, საინფორმაციო საუბარია — სამართლებრივი ანალიზი არ გჭირდება.
+
+✅ უპასუხე ბუნებრივად, მოკლედ და სასარგებლოდ
+✅ თუ მომხმარებელი კონკრეტულ სამართლებრივ კითხვას სვამს — შეახსენე, რომ ის კითხვა დასვას და ბაზაში მოვძებნი
+❌ IRAC სტრუქტურა ნუ გამოიყენე
+❌ case-ები ნუ გამოიგონე
+❌ სამართლებრივი ანალიზის სექციები ნუ ჩასვი
+INST,
+
             'find' => <<<INST
 მომხმარებელს სურს გადაწყვეტილებების მოძებნა.
 
@@ -509,6 +679,12 @@ INST,
     {
         $parts = [];
 
+        // ── Verified sources whitelist — LLM-ს ეუბნება რომელი ნომრები "აქვს" ──
+        $verifiedBlock = $this->citationVerifier->buildVerifiedSourcesBlock($decisions, $matsneResults);
+        if (!empty($verifiedBlock)) {
+            $parts[] = $verifiedBlock;
+        }
+
         // ── Law articles block ────────────────────────────────────────────────
         if (!empty($lawResults)) {
             $lawBlock = ["RETRIEVED LEGISLATION:\n"];
@@ -536,30 +712,7 @@ BLOCK;
 
         // ── Matsne documents block ────────────────────────────────────────────
         if (!empty($matsneResults)) {
-            $matsneBlock = ["RETRIEVED MATSNE DOCUMENTS (Georgian Legislation):\n"];
-            foreach ($matsneResults as $i => $doc) {
-                $num      = $i + 1;
-                $active   = $doc['is_active'] ? 'მოქმედი' : 'ძველი ვერსია (კანონი შეიძლება ძალაშია)';
-                $docType  = $doc['doc_type'] ?? 'N/A';
-                $issuer   = $doc['issuer']   ?? 'N/A';
-                $years    = $doc['effective_from_year']
-                    ? ($doc['effective_from_year'] . ($doc['effective_to_year'] ? '–' . $doc['effective_to_year'] : '–დღეს'))
-                    : 'N/A';
-
-                $matsneBlock[] = <<<BLOCK
---- MATSNE DOC #{$num} ---
-Title: {$doc['title']}
-Type: {$docType} | Issuer: {$issuer}
-Status: {$active} | Years: {$years}
-Similarity: {$doc['similarity']}
-URL: {$doc['url']}
-
-EXCERPT:
-{$doc['excerpt']}
---- END MATSNE DOC #{$num} ---
-BLOCK;
-            }
-            $parts[] = implode("\n\n", $matsneBlock);
+            $parts[] = $this->buildMatsneBlock($matsneResults);
         }
 
         // ── EU documents block ────────────────────────────────────────────────
@@ -770,6 +923,111 @@ BLOCK;
     }
 
     /**
+     * Formats matsne results into a structured context block.
+     *
+     * Article-sourced docs (article_detector / concept_detector) are grouped by law
+     * and labeled clearly so the AI knows exactly which article it is reading.
+     * Semantic docs fall back to the generic format.
+     */
+    private function buildMatsneBlock(array $matsneResults): string
+    {
+        // Separate article-specific results from semantic results
+        $articleDocs  = [];
+        $semanticDocs = [];
+
+        foreach ($matsneResults as $doc) {
+            $source = $doc['_source'] ?? null;
+            if (in_array($source, ['article_detector', 'concept_detector'], true)) {
+                $articleDocs[] = $doc;
+            } else {
+                $semanticDocs[] = $doc;
+            }
+        }
+
+        $sections = [];
+
+        // ── Article-specific: grouped by matsne_id ────────────────────────────
+        if (!empty($articleDocs)) {
+            $byLaw = [];
+            foreach ($articleDocs as $doc) {
+                $byLaw[$doc['matsne_id']][] = $doc;
+            }
+
+            $lawSections = [];
+            foreach ($byLaw as $matsneId => $docs) {
+                $firstDoc  = $docs[0];
+                $title     = $firstDoc['title'];
+                $active    = $firstDoc['is_active'] ? 'მოქმედი' : 'ძველი ვერსია';
+                $years     = $firstDoc['effective_from_year']
+                    ? ($firstDoc['effective_from_year'] . ($firstDoc['effective_to_year'] ? '–' . $firstDoc['effective_to_year'] : '–დღეს'))
+                    : '';
+                $url       = $firstDoc['url'];
+                $yearsStr  = $years ? " | {$years}" : '';
+
+                // Collect concept stems that triggered this law
+                $stems = array_unique(array_filter(array_column($docs, '_concept_stem')));
+                $stemNote = !empty($stems) ? ' (detected: "' . implode('", "', $stems) . '")' : '';
+
+                // Article sub-sections
+                $articleLines = [];
+                foreach ($docs as $doc) {
+                    $artNum    = $doc['_article_num'] ?? null;
+                    $source    = $doc['_source'];
+                    $sourceTag = $source === 'article_detector' ? '📌 explicit citation' : '💡 concept-injected';
+                    $artHeader = $artNum ? "მუხლი {$artNum}" : 'სექცია';
+
+                    $articleLines[] = <<<ART
+
+{$artHeader} [{$sourceTag}]:
+{$doc['excerpt']}
+ART;
+                }
+
+                $articlesBlock = implode("\n" . str_repeat('─', 40), $articleLines);
+
+                $lawSections[] = <<<LAW
+╔══ {$title}{$yearsStr} | {$active} ══╗
+URL: {$url}{$stemNote}
+{$articlesBlock}
+╚══ END: {$title} ══╝
+LAW;
+            }
+
+            $sections[] = "RETRIEVED LEGISLATION — SPECIFIC ARTICLES:\n\n" . implode("\n\n", $lawSections);
+        }
+
+        // ── Semantic results: standard format ─────────────────────────────────
+        if (!empty($semanticDocs)) {
+            $semanticLines = ["RETRIEVED MATSNE DOCUMENTS (semantic search):\n"];
+            foreach ($semanticDocs as $i => $doc) {
+                $num     = $i + 1;
+                $active  = $doc['is_active'] ? 'მოქმედი' : 'ძველი ვერსია';
+                $docType = $doc['doc_type'] ?? 'N/A';
+                $issuer  = $doc['issuer']   ?? 'N/A';
+                $years   = $doc['effective_from_year']
+                    ? ($doc['effective_from_year'] . ($doc['effective_to_year'] ? '–' . $doc['effective_to_year'] : '–დღეს'))
+                    : 'N/A';
+
+                $semanticLines[] = <<<BLOCK
+--- MATSNE DOC #{$num} ---
+Title: {$doc['title']}
+Type: {$docType} | Issuer: {$issuer}
+Status: {$active} | Years: {$years}
+Similarity: {$doc['similarity']}
+URL: {$doc['url']}
+
+EXCERPT:
+{$doc['excerpt']}
+--- END MATSNE DOC #{$num} ---
+BLOCK;
+            }
+            $sections[] = implode("\n\n", $semanticLines);
+        }
+
+        return implode("\n\n────────────────────────\n\n", $sections);
+    }
+
+    /**
      * Mode-aware text extraction strategy.
      *
      * find      → compact excerpt (1200)
@@ -838,6 +1096,8 @@ BLOCK;
         array           $constCourtResults = [],
         array           $sources = ['court', 'matsne', 'eu', 'german', 'const_court'],
         ?IssueList      $issueList = null,
+        ?TriageResult   $triage = null,
+        array           $extractedRules = [],
     ): \Generator {
         set_time_limit(0);
 
@@ -846,8 +1106,9 @@ BLOCK;
             'mode'  => $mode,
         ]);
 
-        $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion);
-        $contextBlock = $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults);
+        $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion, $triage);
+        $rulesBlock   = $this->ruleExtractor->buildPromptBlock($extractedRules);
+        $contextBlock = $rulesBlock . ($rulesBlock ? "\n\n" : '') . $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults);
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
         $client = new GuzzleClient();

@@ -142,7 +142,7 @@ class LegalChatController extends Controller
     {
         return response()->stream(function () use ($request, $chat) {
 
-            set_time_limit(120);
+            set_time_limit(300);
 
             // Disable output buffering for true streaming
             if (ob_get_level()) {
@@ -185,6 +185,8 @@ class LegalChatController extends Controller
                     constCourtResults:  $ctx['constCourtResults']  ?? [],
                     sources:            $ctx['sources'],
                     issueList:          $ctx['issueList'],
+                    triage:             $ctx['triageResult'] ?? null,
+                    extractedRules:     $ctx['extractedRules'] ?? [],
                 );
 
                 foreach ($generator as $token) {
@@ -192,7 +194,7 @@ class LegalChatController extends Controller
                     $emit('token', ['token' => $token]);
                 }
 
-                // ── Stage 3: persist & emit final payload ─────────────────────
+                // ── Stage 3: persist & emit done immediately ──────────────────
                 $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText);
 
                 $emit('done', [
@@ -203,6 +205,7 @@ class LegalChatController extends Controller
                     'eu_citations'     => $assistantMessage->meta['eu_citations']       ?? [],
                     'german_citations'      => $assistantMessage->meta['german_citations']       ?? [],
                     'const_court_citations' => $assistantMessage->meta['const_court_citations']  ?? [],
+                    'eval'             => null,
                     'meta'         => [
                         'retrieval_mode'   => $assistantMessage->meta['retrieval_mode']   ?? null,
                         'answer_mode'      => $assistantMessage->meta['answer_mode']      ?? null,
@@ -213,6 +216,15 @@ class LegalChatController extends Controller
                         'pipeline_ms'      => $assistantMessage->meta['pipeline_ms']      ?? null,
                     ],
                 ]);
+
+                // ── Stage 4: eval runs after done (non-blocking UX) ───────────
+                $evalResult = $this->orchestrator->runEval($assistantMessage, $ctx, $fullText);
+                if ($evalResult !== null) {
+                    $emit('eval', [
+                        'message_id' => $assistantMessage->id,
+                        'eval'       => $evalResult,
+                    ]);
+                }
 
             } catch (Throwable $e) {
                 Log::error('LegalChat stream error', [
@@ -247,6 +259,7 @@ class LegalChatController extends Controller
             'eu_citations'     => $message->meta['eu_citations']       ?? [],
             'german_citations'      => $message->meta['german_citations']       ?? [],
             'const_court_citations' => $message->meta['const_court_citations']  ?? [],
+            'eval'                  => $message->meta['eval']                   ?? null,
             'meta'          => [
                 'retrieval_mode'   => $message->meta['retrieval_mode']   ?? null,
                 'answer_mode'      => $message->meta['answer_mode']      ?? null,

@@ -64,7 +64,7 @@ FEWSHOT;
                 ->post("{$this->baseUrl}/chat/completions", [
                     'model'       => $this->model,
                     'temperature' => 0,
-                    'max_tokens'  => 600,
+                    'max_tokens'  => 1000,
                     'messages'    => [
                         ['role' => 'system', 'content' => $this->systemPrompt()],
                         ['role' => 'user',   'content' => self::FEW_SHOT . "\n\nINPUT:\n\"{$userQuestion}\"\n\nOUTPUT:"],

@@ -33,17 +33,18 @@ class MatsneRetrieverService
      * @param  string[] $domains  Legal domains to filter by (empty = no filter)
      * @return array<int, array{matsne_id, title, doc_type, issuer, is_active, excerpt, similarity, url, hierarchy_level}>
      */
-    public function retrieve(string $query, int $limit = self::DOC_LIMIT, array $embedding = [], array $domains = []): array
+    public function retrieve(string $query, int $limit = self::DOC_LIMIT, array $embedding = [], array $domains = [], ?int $relevantYear = null): array
     {
         if (empty($embedding)) {
             $embedding = $this->embedder->embed($query);
         }
 
-        $keywordResults  = $this->keywordSearch($query, $limit * 2, $domains);
+        $year            = $relevantYear ?? (int) date('Y');
+        $keywordResults  = $this->keywordSearch($query, $limit * 2, $domains, $year);
         $semanticResults = [];
 
         if (!empty($embedding)) {
-            $semanticResults = $this->vectorSearch($embedding, $limit, $domains);
+            $semanticResults = $this->vectorSearch($embedding, $limit, $domains, $year);
         } else {
             Log::debug('MatsneRetriever: embedding failed, keyword-only mode');
         }
@@ -54,8 +55,8 @@ class MatsneRetrieverService
         // If domain filter yields nothing, retry without filter (graceful fallback)
         if (empty($results) && !empty($domains)) {
             Log::debug('MatsneRetriever: domain filter returned empty, retrying without filter', ['domains' => $domains]);
-            $kwFallback  = $this->keywordSearch($query, $limit * 2, []);
-            $vecFallback = !empty($embedding) ? $this->vectorSearch($embedding, $limit, []) : [];
+            $kwFallback  = $this->keywordSearch($query, $limit * 2, [], $year);
+            $vecFallback = !empty($embedding) ? $this->vectorSearch($embedding, $limit, [], $year) : [];
             $results     = $this->mergeResults($kwFallback, $vecFallback, $limit);
         }
 
@@ -70,7 +71,7 @@ class MatsneRetrieverService
         return $results;
     }
 
-    private function keywordSearch(string $query, int $limit, array $domains): array
+    private function keywordSearch(string $query, int $limit, array $domains, int $year): array
     {
         $lines = array_filter(
             preg_split('/\n+/u', trim($query)),
@@ -101,7 +102,9 @@ class MatsneRetrieverService
 
         $where       = implode(' OR ', $conditions);
         $domainSql   = $this->domainSql($domains);
-        $params['lim'] = $limit;
+        $params['lim']       = $limit;
+        $params['year_from'] = $year;
+        $params['year_to']   = $year;
 
         try {
             $rows = DB::connection('pgvector')->select("
@@ -118,7 +121,10 @@ class MatsneRetrieverService
                     COALESCE(md.hierarchy_level, 5) AS hierarchy_level
                 FROM matsne_chunks_v2 mc
                 LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
-                WHERE ({$where})
+                WHERE mc.is_active = true
+                  AND ({$where})
+                  AND (mc.effective_from_year IS NULL OR mc.effective_from_year <= :year_from)
+                  AND (mc.effective_to_year   IS NULL OR mc.effective_to_year   >= :year_to)
                   {$domainSql}
                 ORDER BY mc.matsne_id, mc.chunk_index ASC
                 LIMIT :lim
@@ -150,7 +156,7 @@ class MatsneRetrieverService
         return array_values($byDoc);
     }
 
-    private function vectorSearch(array $embedding, int $limit, array $domains): array
+    private function vectorSearch(array $embedding, int $limit, array $domains, int $year): array
     {
         $vec         = '[' . implode(',', $embedding) . ']';
         $domainSql   = $this->domainSql($domains);
@@ -175,6 +181,8 @@ class MatsneRetrieverService
                 WHERE mc.embedding IS NOT NULL
                   AND mc.is_active = true
                   AND 1 - (mc.embedding <=> :emb2::vector) >= :threshold
+                  AND (mc.effective_from_year IS NULL OR mc.effective_from_year <= :year_from)
+                  AND (mc.effective_to_year   IS NULL OR mc.effective_to_year   >= :year_to)
                   {$domainSql}
                 ORDER BY similarity DESC
                 LIMIT :chunk_limit
@@ -182,6 +190,8 @@ class MatsneRetrieverService
                 'emb'         => $vec,
                 'emb2'        => $vec,
                 'threshold'   => $threshold,
+                'year_from'   => $year,
+                'year_to'     => $year,
                 'chunk_limit' => self::CHUNK_LIMIT,
             ], $domainBinds));
 

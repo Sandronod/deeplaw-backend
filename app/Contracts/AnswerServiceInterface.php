@@ -4,6 +4,7 @@ namespace App\Contracts;
 
 use App\DTOs\ConfidenceResult;
 use App\DTOs\IssueList;
+use App\DTOs\TriageResult;
 
 interface AnswerServiceInterface
 {
@@ -25,6 +26,7 @@ interface AnswerServiceInterface
         array            $constCourtResults  = [],
         array            $sources            = ['court', 'matsne', 'eu', 'german', 'const_court'],
         ?IssueList       $issueList          = null,
+        ?TriageResult    $triage             = null,
     ): string;
 
     /**
@@ -46,5 +48,6 @@ interface AnswerServiceInterface
         array            $constCourtResults  = [],
         array            $sources            = ['court', 'matsne', 'eu', 'german', 'const_court'],
         ?IssueList       $issueList          = null,
+        ?TriageResult    $triage             = null,
     ): \Generator;
 }

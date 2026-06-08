@@ -21,13 +21,25 @@ class QueryExtractorService
         $this->baseUrl = config('openai.base_url', 'https://api.openai.com/v1');
     }
 
+    private const VALID_DOMAINS = [
+        'civil', 'criminal', 'admin', 'corporate',
+        'labor', 'property', 'procedure', 'tax', 'family', 'echr',
+    ];
+
     /**
-     * Extracts clean legal search terms from user message.
+     * Extracts search terms AND legal domain from the user message in one LLM call.
      *
-     * "მიპოვე და შემიჯამე სახელმწიფო კომპენსაციის შესახებ გადაწყვეტილება"
-     *   → "სახელმწიფო კომპენსაცია"
+     * Returns ['query' => string, 'domain' => string|null]
+     *
+     * "დამქირავებელს შეუძლია კონტრაქტი შეწყვიტოს?"
+     *   → ['query' => "ქირავნობა\nხელშეკრულების შეწყვეტა", 'domain' => 'civil']
      */
     public function extract(string $userMessage): string
+    {
+        return $this->extractWithDomain($userMessage)['query'];
+    }
+
+    public function extractWithDomain(string $userMessage): array
     {
         try {
             $response = Http::retry(3, 600, fn ($e) =>
@@ -38,54 +50,80 @@ class QueryExtractorService
                 ->post("{$this->baseUrl}/chat/completions", [
                     'model'       => $this->model,
                     'temperature' => 0,
-                    'max_tokens'  => 120,
+                    'max_tokens'  => 160,
                     'messages'    => [
                         [
                             'role'    => 'system',
-                            'content' => <<<PROMPT
-ამოიღე სამართლებრივი საძიებო ტერმინები შემდეგი წესებით:
+                            'content' => <<<'PROMPT'
+შენ ქართული სამართლის ექსპერტი ხარ. მომხმარებლის შეტყობინებიდან ამოიღე:
+1. საძიებო ტერმინები
+2. სამართლის დარგი
 
-ფორმატი:
-- ერთი ტერმინი/ფრაზა თითო ხაზზე
-- მაქსიმუმ 6 ხაზი
-- მხოლოდ ტერმინები — კომენტარი, ახსნა, სრული წინადადებები დაუშვებელია
+დააბრუნე მხოლოდ JSON:
+{
+  "query": "ტერმინები — ერთი ხაზზე ერთი, მაქს 6, task-სიტყვები მოშორებული",
+  "domain": "civil|criminal|admin|corporate|labor|property|procedure|tax|family|echr|null"
+}
 
-ამოიღე:
-- task სიტყვები: "მიპოვე", "შემიჯამე", "განმარტე", "find", "summarize", "გთხოვ", "შეაფასე"
-- ზოგადი სიტყვები: "გადაწყვეტილება", "სასამართლო", "დავა", "საქმე", "კითხვა"
-
-შეინახე:
-- სამართლის დარგი (მაგ: "სამოქალაქო სამართალი", "შრომის კანონი")
-- ძირითადი სამართლებრივი ტერმინები (მაგ: "იძულებითი გამოყოფა", "კაპიტალის შეტანა")
-- case number-ები, სახელები, ინსტიტუციები
+domain წესები:
+- civil     → სამოქალაქო, ხელშეკრულება, კონტრაქტი, ქირავნობა, ნასყიდობა, ზიანი, ვალდებულება
+- criminal  → სისხლის, დანაშაული, სასჯელი, ბრალი
+- admin     → ადმინისტრაციული, ნებართვა, სამინისტრო, საჯარო
+- corporate → შპს, სს, დირექტორი, პარტნიორი, სამეწარმეო
+- labor     → შრომა, დასაქმება, ხელფასი, გათავისუფლება, სამუშაო
+- property  → საკუთრება, მიწა, იპოთეკა, უძრავი ქონება
+- tax       → საგადასახადო, დღგ, გადასახადი
+- family    → განქორწინება, მეუღლე, შვილი, მეურვეობა, ალიმენტი
+- procedure → სარჩელი, გასაჩივრება, მტკიცებულება, საპროცესო
+- echr      → სტრასბურგი, ადამიანის უფლება, კონვენცია
+- null      → გაურკვეველია
 
 მაგალითები:
-"მიპოვე სადაზღვეო ხელშეკრულების შეწყვეტის შესახებ" → "სადაზღვეო ხელშეკრულება\nხელშეკრულების შეწყვეტა"
-"შპს პარტნიორის კაპიტალის შეტანაზე უარი" → "შპს\nკაპიტალის შეტანა\nპარტნიორის გამოყოფა\nმეწარმეთა კანონი"
-"ბავშვის მეურვეობა განქორწინებისას" → "მეურვეობა\nალიმენტი\nგანქორწინება\nოჯახის კოდექსი"
+"დამქირავებელს შეუძლია კონტრაქტი შეწყვიტოს?" → {"query":"ქირავნობა\nხელშეკრულების ცალმხრივი შეწყვეტა","domain":"civil"}
+"შრომითი დავა გათავისუფლებასთან დაკავშირებით" → {"query":"შრომითი დავა\nგათავისუფლება","domain":"labor"}
+"ბავშვის მეურვეობა განქორწინებისას" → {"query":"მეურვეობა\nალიმენტი\nგანქორწინება","domain":"family"}
 PROMPT,
                         ],
                         ['role' => 'user', 'content' => $userMessage],
                     ],
                 ]);
 
-            $extracted = trim($response->json('choices.0.message.content') ?? '');
+            $raw = trim($response->json('choices.0.message.content') ?? '');
+            $raw = preg_replace('/^```(?:json)?\s*/i', '', $raw);
+            $raw = preg_replace('/\s*```$/i', '', $raw);
 
-            if (!empty($extracted)) {
-                // Expand with glossary synonyms (e.g. სარჩელი → სასარჩელო განცხადება)
-                $synonyms = $this->glossary->expandQuery($userMessage);
-                if (!empty($synonyms)) {
-                    $extracted .= "\n" . implode("\n", $synonyms);
-                    Log::debug('QueryExtractor: glossary expansion', ['added' => $synonyms]);
-                }
+            $parsed = json_decode($raw, true);
+            $query  = trim($parsed['query'] ?? '');
+            $domain = $parsed['domain'] ?? null;
 
-                Log::debug('QueryExtractor', ['original' => $userMessage, 'extracted' => $extracted]);
-                return $extracted;
+            if (empty($query)) {
+                return ['query' => $userMessage, 'domain' => null];
             }
+
+            // Validate domain
+            if (!in_array($domain, self::VALID_DOMAINS, true)) {
+                $domain = null;
+            }
+
+            // Expand with glossary synonyms
+            $synonyms = $this->glossary->expandQuery($userMessage);
+            if (!empty($synonyms)) {
+                $query .= "\n" . implode("\n", $synonyms);
+                Log::debug('QueryExtractor: glossary expansion', ['added' => $synonyms]);
+            }
+
+            Log::debug('QueryExtractor', [
+                'original' => $userMessage,
+                'query'    => $query,
+                'domain'   => $domain,
+            ]);
+
+            return ['query' => $query, 'domain' => $domain];
+
         } catch (\Throwable $e) {
             Log::warning('QueryExtractor failed, using original: ' . $e->getMessage());
         }
 
-        return $userMessage;
+        return ['query' => $userMessage, 'domain' => null];
     }
 }
