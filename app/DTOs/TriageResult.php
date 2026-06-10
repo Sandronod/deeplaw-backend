@@ -27,6 +27,9 @@ class TriageResult
         public readonly bool      $needsGerman,      // German law retriever
         public readonly ?int      $temporalYear,     // year filter (null = no filter)
         public readonly bool      $isComplex,        // multiple domains or many issues
+        public readonly int       $complexityScore = 50,
+        public readonly string    $complexityLevel = 'normal', // 'fast' | 'normal' | 'full'
+        public readonly array     $complexityReasons = [],
     ) {}
 
     public static function chat(): self
@@ -45,6 +48,9 @@ class TriageResult
             needsGerman:     false,
             temporalYear:    null,
             isComplex:       false,
+            complexityScore:  0,
+            complexityLevel:  'fast',
+            complexityReasons: ['chat_only'],
         );
     }
 
@@ -56,6 +62,11 @@ class TriageResult
     public function caseTypeFilter(): ?string
     {
         return $this->caseType === 'any' ? null : $this->caseType;
+    }
+
+    public function isFastPath(): bool
+    {
+        return $this->complexityLevel === 'fast';
     }
 
     public function toDebugArray(): array
@@ -73,6 +84,9 @@ class TriageResult
             'needs_german'     => $this->needsGerman,
             'temporal_year'    => $this->temporalYear,
             'is_complex'       => $this->isComplex,
+            'complexity_score' => $this->complexityScore,
+            'complexity_level' => $this->complexityLevel,
+            'complexity_reasons' => $this->complexityReasons,
             'issue_count'      => $this->issueList->issueCount,
         ];
     }

@@ -1,0 +1,373 @@
+{
+    "version": 1,
+    "name": "legal_core_norms_v1",
+    "description": "Starter benchmark for Georgian legal norm and article retrieval. Court-case gold remains in storage/app/eval/gold_set.json.",
+    "scenarios": [
+        {
+            "id": "labor_termination_concept",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "დამსაქმებელმა გამათავისუფლა წერილობითი დასაბუთების გარეშე, რომელი ნორმები უნდა ვნახო?",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1155567, "articles": [47, 48]}
+                ],
+                "forbidden_matsne_ids": [29962]
+            }
+        },
+        {
+            "id": "labor_article_48",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "შრომის კოდექსის 48-ე მუხლი განმიმარტე",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1155567, "articles": [48]}
+                ],
+                "forbidden_matsne_ids": [29962]
+            }
+        },
+        {
+            "id": "labor_article_47",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "შრომის კოდექსის 47-ე მუხლი რაზე საუბრობს?",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1155567, "articles": [47]}
+                ],
+                "forbidden_matsne_ids": [29962]
+            }
+        },
+        {
+            "id": "labor_article_12",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "შრომის კოდექსის 12-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1155567, "articles": [12]}
+                ]
+            }
+        },
+        {
+            "id": "labor_article_17",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "შრომის კოდექსის 17-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1155567, "articles": [17]}
+                ]
+            }
+        },
+        {
+            "id": "civil_article_54",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სკ-ის 54-ე მუხლი რა შემთხვევას ეხება?",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 31702, "articles": [54]}
+                ]
+            }
+        },
+        {
+            "id": "civil_article_115",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო კოდექსის 115-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 31702, "articles": [115]}
+                ]
+            }
+        },
+        {
+            "id": "civil_article_316",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო კოდექსის 316-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 31702, "articles": [316]}
+                ]
+            }
+        },
+        {
+            "id": "civil_article_317",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო კოდექსის 317-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 31702, "articles": [317]}
+                ]
+            }
+        },
+        {
+            "id": "civil_article_394",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო კოდექსის 394-ე მუხლი განმიმარტე",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 31702, "articles": [394]}
+                ]
+            }
+        },
+        {
+            "id": "civil_article_411",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო კოდექსის 411-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 31702, "articles": [411]}
+                ]
+            }
+        },
+        {
+            "id": "civil_procedure_article_22",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო საპროცესო კოდექსის 22-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 29962, "articles": [22]}
+                ]
+            }
+        },
+        {
+            "id": "civil_procedure_article_47",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო საპროცესო კოდექსის 47-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 29962, "articles": [47]}
+                ]
+            }
+        },
+        {
+            "id": "civil_procedure_article_102",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო საპროცესო კოდექსის 102-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 29962, "articles": [102]}
+                ]
+            }
+        },
+        {
+            "id": "civil_procedure_article_180",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სამოქალაქო საპროცესო კოდექსის 180-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 29962, "articles": [180]}
+                ]
+            }
+        },
+        {
+            "id": "admin_procedure_article_22",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "ადმ.საპ-ის 22-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16492, "articles": [22]}
+                ]
+            }
+        },
+        {
+            "id": "admin_procedure_article_24",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "ადმინისტრაციული საპროცესო კოდექსის 24-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16492, "articles": [24]}
+                ]
+            }
+        },
+        {
+            "id": "admin_procedure_article_32",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "ადმინისტრაციული საპროცესო კოდექსის 32-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16492, "articles": [32]}
+                ]
+            }
+        },
+        {
+            "id": "general_admin_article_53",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "ზაკ-ის 53-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16270, "articles": [53]}
+                ]
+            }
+        },
+        {
+            "id": "general_admin_article_60",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "ზოგადი ადმინისტრაციული კოდექსის 60-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16270, "articles": [60]}
+                ]
+            }
+        },
+        {
+            "id": "general_admin_article_96",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "ზოგადი ადმინისტრაციული კოდექსის 96-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16270, "articles": [96]}
+                ]
+            }
+        },
+        {
+            "id": "criminal_article_19",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სისხლის სამართლის კოდექსის 19-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16426, "articles": [19]}
+                ]
+            }
+        },
+        {
+            "id": "criminal_article_108",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სისხლის სამართლის კოდექსის 108-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16426, "articles": [108]}
+                ]
+            }
+        },
+        {
+            "id": "criminal_article_109",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სისხლის სამართლის კოდექსის 109-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16426, "articles": [109]}
+                ]
+            }
+        },
+        {
+            "id": "criminal_article_177",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სისხლის სამართლის კოდექსის 177-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 16426, "articles": [177]}
+                ]
+            }
+        },
+        {
+            "id": "criminal_procedure_article_72",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სისხლის სამართლის საპროცესო კოდექსის 72-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 90034, "articles": [72]}
+                ]
+            }
+        },
+        {
+            "id": "criminal_procedure_article_111",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "სისხლის სამართლის საპროცესო კოდექსის 111-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 90034, "articles": [111]}
+                ]
+            }
+        },
+        {
+            "id": "tax_article_82",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "საგადასახადო კოდექსის 82-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1043717, "articles": [82]}
+                ]
+            }
+        },
+        {
+            "id": "tax_article_98",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "საგადასახადო კოდექსის 98-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1043717, "articles": [98]}
+                ]
+            }
+        },
+        {
+            "id": "tax_article_101",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "საგადასახადო კოდექსის 101-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1043717, "articles": [101]}
+                ]
+            }
+        },
+        {
+            "id": "tax_article_102",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "საგადასახადო კოდექსის 102-ე მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 1043717, "articles": [102]}
+                ]
+            }
+        },
+        {
+            "id": "entrepreneurs_article_2",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "მეწარმეთა შესახებ კანონის მე-2 მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 5230186, "articles": [2]}
+                ]
+            }
+        },
+        {
+            "id": "entrepreneurs_article_3",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "მეწარმეთა შესახებ კანონის მე-3 მუხლი",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 5230186, "articles": [3]}
+                ]
+            }
+        }
+    ]
+}

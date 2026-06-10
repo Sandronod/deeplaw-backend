@@ -6,6 +6,7 @@ use App\DTOs\ConfidenceResult;
 use App\DTOs\ParsedQuery;
 use App\DTOs\RetrievalResult;
 use App\DTOs\TriageResult;
+use App\Services\AI\AnswerValidatorService;
 use App\Services\AI\CitationVerifierService;
 use App\Services\AI\EvalJudgeService;
 use App\Services\AI\LegalRuleExtractorService;
@@ -14,8 +15,10 @@ use App\Models\ChatMessage;
 use App\Services\AI\ConfidenceAssessor;
 use App\Services\AI\EmbedCacheService;
 use App\Services\AI\EvidenceBuilderService;
+use App\Services\AI\CaseRelevanceScorerService;
 use App\Services\AI\HyDEService;
 use App\Services\AI\OllamaEmbeddingService;
+use App\Services\AI\OpenAIEmbeddingService;
 use App\Contracts\AnswerServiceInterface;
 use App\Services\AI\QueryParserService;
 use App\Services\AI\DecisionAuthorityScorer;
@@ -46,6 +49,7 @@ class LegalChatOrchestratorService
         private readonly ConfidenceAssessor         $confidenceAssessor,
         private readonly RerankerService            $reranker,
         private readonly EvidenceBuilderService     $evidenceBuilder,
+        private readonly CaseRelevanceScorerService $caseRelevanceScorer,
         private readonly DecisionAuthorityScorer    $authorityScorer,
         private readonly KnowledgeSourceRouter      $sourceRouter,
         private readonly EchrRetrieverService       $echrRetriever,
@@ -57,8 +61,10 @@ class LegalChatOrchestratorService
         private readonly GermanRetrieverService     $germanRetriever,
         private readonly ConstCourtRetrieverService $constCourtRetriever,
         private readonly OllamaEmbeddingService     $ollamaEmbedder,
+        private readonly OpenAIEmbeddingService     $openAiEmbedder,
         private readonly LegalTriageService         $triage,
         private readonly CitationVerifierService    $citationVerifier,
+        private readonly AnswerValidatorService     $answerValidator,
         private readonly EvalJudgeService           $evalJudge,
         private readonly LegalRuleExtractorService  $ruleExtractor,
     ) {}
@@ -66,10 +72,11 @@ class LegalChatOrchestratorService
     /**
      * Full pipeline (non-streaming): prepare → answer → finalize.
      */
-    public function handle(Chat $chat, string $userQuestion, array $sources = ['court', 'matsne', 'eu', 'german', 'const_court']): array
+    public function handle(Chat $chat, string $userQuestion, array $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court']): array
     {
         $ctx = $this->prepare($chat, $userQuestion, $sources);
 
+        $answerStartedAt = microtime(true);
         $answerText = $this->answerer->answer(
             userQuestion:      $ctx['userQuestion'],
             decisions:         $ctx['finalDecisions'],
@@ -88,6 +95,7 @@ class LegalChatOrchestratorService
             triage:            $ctx['triageResult'],
             extractedRules:    $ctx['extractedRules']    ?? [],
         );
+        $ctx['timings_ms']['answer_generation'] = $this->elapsedMs($answerStartedAt);
 
         $assistantMessage = $this->finalize($chat, $ctx, $answerText);
 
@@ -101,35 +109,50 @@ class LegalChatOrchestratorService
      * Runs all pipeline steps up to (but not including) the LLM answer call.
      * Returns a context array that can be passed to finalize() after streaming.
      */
-    public function prepare(Chat $chat, string $userQuestion, array $sources = ['court', 'matsne', 'eu', 'german', 'const_court']): array
+    public function prepare(Chat $chat, string $userQuestion, array $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court']): array
     {
         $startTime = microtime(true);
+        $timings = [];
 
         // ── 1. Save user message [DB] ─────────────────────────────────────────
+        $stageStartedAt = microtime(true);
         $userMessage = ChatMessage::create([
             'chat_id' => $chat->id,
             'role'    => 'user',
             'content' => $userQuestion,
         ]);
+        $timings['save_user_message'] = $this->elapsedMs($stageStartedAt);
 
         // ── 2. Auto-set chat title [DB] ───────────────────────────────────────
+        $stageStartedAt = microtime(true);
         if (is_null($chat->title)) {
             $chat->update(['title' => $this->titleService->generateFromMessage($userQuestion)]);
         }
+        $timings['title_update'] = $this->elapsedMs($stageStartedAt);
 
         // ── 3+4. Triage — intent + mode + issue spotting + domain + source plan ─
+        $stageStartedAt = microtime(true);
         $triageResult = $this->triage->triage($userQuestion, $sources);
         $intent       = $triageResult->intent;
         $mode         = $triageResult->mode;
         $issueList    = $triageResult->issueList;
+        $timings['triage'] = $this->elapsedMs($stageStartedAt);
 
         Log::debug('Orchestrator: triage', $triageResult->toDebugArray());
 
         // ── 5. Retrieval pipeline ─────────────────────────────────────────────
-        [$retrieval, $parsedQuery, $debugFlags, $searchTerms, $ollamaEmbedding] = $this->runPipeline($triageResult, $userQuestion, $sources);
+        $stageStartedAt = microtime(true);
+        [$retrieval, $parsedQuery, $debugFlags, $searchTerms, $ollamaEmbedding, $pipelineTimings] = $this->runPipeline($triageResult, $userQuestion, $sources);
+        $timings['court_pipeline_total'] = $this->elapsedMs($stageStartedAt);
+        $timings['court_pipeline'] = $pipelineTimings;
+        $courtRankingQuery = $this->courtRankingQuery($triageResult, $searchTerms, $userQuestion);
+        $debugFlags['court_ranking_query'] = mb_substr($courtRankingQuery, 0, 500);
+        $debugFlags['court_ranking_query_chars'] = mb_strlen($courtRankingQuery);
 
         // ── 5. Confidence assessment ──────────────────────────────────────────
+        $stageStartedAt = microtime(true);
         $confidence = $this->confidenceAssessor->assess($retrieval);
+        $timings['confidence_assessment'] = $this->elapsedMs($stageStartedAt);
 
         Log::debug('Orchestrator: confidence', [
             'label'       => $confidence->label,
@@ -138,9 +161,18 @@ class LegalChatOrchestratorService
         ]);
 
         // ── 6a. Authority scoring — court level + year + joint panel ─────────
+        $stageStartedAt = microtime(true);
         $scoredDecisions = $this->authorityScorer->score($retrieval->decisions, $mode);
+        $timings['authority_scoring'] = $this->elapsedMs($stageStartedAt);
+
+        $stageStartedAt = microtime(true);
+        $scoredDecisions = $this->caseRelevanceScorer->score($courtRankingQuery, $scoredDecisions, $issueList);
+        $timings['semantic_relevance_scoring'] = $this->elapsedMs($stageStartedAt);
 
         $debugFlags['authority_scored'] = !empty($scoredDecisions);
+        $debugFlags['semantic_relevance_scored'] = !empty($scoredDecisions);
+        $debugFlags['top_semantic_case'] = $scoredDecisions[0]['case_num'] ?? null;
+        $debugFlags['top_semantic_score'] = $scoredDecisions[0]['semantic_relevance_score'] ?? null;
         $debugFlags['outliers_flagged'] = count(array_filter(
             $scoredDecisions,
             fn($d) => in_array('outlier', $d['quality_flags'] ?? [])
@@ -151,36 +183,93 @@ class LegalChatOrchestratorService
         ));
 
         // ── 6b. Rerank candidates → top K ────────────────────────────────────
-        $topK           = (int) config('openai.retrieval_case_limit', 3);
+        $topK           = max(
+            (int) config('openai.retrieval_case_limit', 3),
+            (int) config('openai.answer_case_limit', 5),
+        );
         $initialCount   = count($scoredDecisions);
-        $finalDecisions = $this->reranker->rerank($userQuestion, $scoredDecisions, $topK, $mode);
+        $stageStartedAt = microtime(true);
+        $finalDecisions = $this->annotateDecisionRoles(
+            $this->reranker->rerank($courtRankingQuery, $scoredDecisions, $topK, $mode),
+        );
+        $timings['rerank'] = $this->elapsedMs($stageStartedAt);
 
         $debugFlags['reranked']                 = count($finalDecisions) !== $initialCount && $initialCount > $topK;
         $debugFlags['initial_candidates_count'] = $initialCount;
         $debugFlags['final_candidates_count']   = count($finalDecisions);
+        $debugFlags['primary_case_count']       = count(array_filter($finalDecisions, fn (array $d) => ($d['answer_role'] ?? null) === 'primary'));
+        $debugFlags['supporting_case_count']    = count(array_filter($finalDecisions, fn (array $d) => ($d['answer_role'] ?? null) === 'supporting'));
 
         // ── 7. Evidence annotations ───────────────────────────────────────────
+        $stageStartedAt = microtime(true);
         $enrichedDecisions = $this->evidenceBuilder->build($userQuestion, $finalDecisions);
+        $timings['evidence_build'] = $this->elapsedMs($stageStartedAt);
 
         // ── 8. Source retrieval — driven by TriageResult ──────────────────────
+        $stageStartedAt = microtime(true);
         $sourcePlan        = $this->sourceRouter->plan($parsedQuery ?? $userQuestion);
+        $timings['source_plan'] = $this->elapsedMs($stageStartedAt);
         $echrResults       = [];
         $matsneResults     = [];
         $euResults         = [];
         $germanResults     = [];
         $constCourtResults = [];
+        $sourcesStartedAt  = microtime(true);
 
         if (!$triageResult->isChatOnly()) {
             $lawDomains = $triageResult->domains;
+            $wantsMatsne     = empty($sources) || in_array('matsne', $sources, true);
+            $wantsEchr       = empty($sources) || in_array('echr', $sources, true);
+            $wantsEu         = empty($sources) || in_array('eu', $sources, true);
+            $wantsGerman     = empty($sources) || in_array('german', $sources, true);
+            $wantsConstCourt = empty($sources) || in_array('const_court', $sources, true);
 
-            // ── Article detector first — no Ollama needed (direct LIKE query) ─
-            try {
-                $matsneResults = $this->articleDetector->detect($userQuestion, $lawDomains);
-                if (!empty($matsneResults)) {
-                    Log::warning('Orchestrator: article detector hit', ['count' => count($matsneResults)]);
+            if ($wantsEchr && $sourcePlan->useEchr && $parsedQuery !== null) {
+                try {
+                    $sourceStartedAt = microtime(true);
+                    $echrText = $searchTerms ?: $userQuestion;
+                    $echrEmbedding = Cache::remember(
+                        'echr_embed_' . md5($echrText . config('openai.embedding_model')),
+                        86400,
+                        fn () => $this->openAiEmbedder->embed($echrText)
+                    );
+                    $echrResults = $this->echrRetriever->retrieve(
+                        $echrEmbedding,
+                        $userQuestion,
+                        $parsedQuery,
+                    );
+                    $timings['echr_retrieval'] = $this->elapsedMs($sourceStartedAt);
+                    Log::debug('Orchestrator: ECHR retrieval', ['count' => count($echrResults)]);
+                } catch (\Throwable $e) {
+                    $timings['echr_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    Log::warning('Orchestrator: ECHR retrieval failed', ['error' => $e->getMessage()]);
                 }
-            } catch (\Throwable $e) {
-                Log::warning('Orchestrator: article detector failed', ['error' => $e->getMessage()]);
+            }
+
+            if ($wantsMatsne && $triageResult->needsNorms) {
+                // ── Article detector first — no Ollama needed (direct LIKE query) ─
+                try {
+                    $sourceStartedAt = microtime(true);
+                    $matsneResults = $this->articleDetector->detect(
+                        $userQuestion,
+                        $lawDomains,
+                        $triageResult->temporalYear ?? (int) date('Y'),
+                    );
+                    $timings['article_detector'] = $this->elapsedMs($sourceStartedAt);
+                    if (!empty($matsneResults)) {
+                        Log::warning('Orchestrator: article detector hit', ['count' => count($matsneResults)]);
+                    }
+                } catch (\Throwable $e) {
+                    $timings['article_detector'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    Log::warning('Orchestrator: article detector failed', ['error' => $e->getMessage()]);
+                }
+            }
+
+            $useSemanticNormSupplement = $this->shouldUseSemanticNormSupplement($triageResult, $matsneResults, $userQuestion);
+            if (!$useSemanticNormSupplement) {
+                $debugFlags['semantic_norm_supplement_skipped'] = true;
+                $timings['norm_embedding'] = 0;
+                $timings['semantic_article_retrieval'] = 0;
             }
 
             // ── Semantic article retriever — universal supplement ──────────────
@@ -189,8 +278,28 @@ class LegalChatOrchestratorService
             // alongside substantive defect articles). Domain filter prevents cross-domain
             // noise. ArticleDetector hits (similarity 0.95) dominate the 6-article cap.
             $relevantYear = $triageResult->temporalYear ?? (int) date('Y');
-            if (!empty($ollamaEmbedding) && !empty($lawDomains)) {
+            if ($useSemanticNormSupplement && $wantsMatsne && $triageResult->needsNorms && !empty($lawDomains) && empty($ollamaEmbedding)) {
                 try {
+                    $sourceStartedAt = microtime(true);
+                    $ollamaText = $searchTerms ?: $userQuestion;
+                    $ollamaCacheKey = 'ollama_embed_' . md5($ollamaText . config('ollama.embedding_model', 'bge-m3'));
+                    $ollamaEmbedding = Cache::remember(
+                        $ollamaCacheKey,
+                        86400,
+                        fn () => $this->matsneRetriever->embedQuery($ollamaText)
+                    );
+                    $timings['norm_embedding'] = $this->elapsedMs($sourceStartedAt);
+                    Log::debug('Orchestrator: norm embedding ready');
+                } catch (\Throwable $e) {
+                    $timings['norm_embedding'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    Log::warning('Orchestrator: norm embedding failed', ['error' => $e->getMessage()]);
+                    $ollamaEmbedding = [];
+                }
+            }
+
+            if ($useSemanticNormSupplement && $wantsMatsne && !empty($ollamaEmbedding) && !empty($lawDomains)) {
+                try {
+                    $sourceStartedAt = microtime(true);
                     $semanticArticles = $this->semanticArticleRetriever->retrieve($ollamaEmbedding, $lawDomains, relevantYear: $relevantYear);
                     if (!empty($semanticArticles)) {
                         $existingKeys = [];
@@ -216,25 +325,30 @@ class LegalChatOrchestratorService
                             'total_matsne'   => count($matsneResults),
                         ]);
                     }
+                    $timings['semantic_article_retrieval'] = $this->elapsedMs($sourceStartedAt);
                 } catch (\Throwable $e) {
+                    $timings['semantic_article_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
                     Log::warning('Orchestrator: semantic article retriever failed', ['error' => $e->getMessage()]);
                 }
             }
 
             // ── Ollama embedding (shared across matsne/eu/german/const_court) ─
-            $needsMatsneSemantic = $triageResult->needsNorms && empty($matsneResults);
+            $needsMatsneSemantic = $useSemanticNormSupplement && $wantsMatsne && $triageResult->needsNorms && empty($matsneResults);
             $needsOllama = $needsMatsneSemantic
-                || $triageResult->needsConstCourt
-                || $triageResult->needsEu
-                || $triageResult->needsGerman;
+                || ($wantsConstCourt && $triageResult->needsConstCourt)
+                || ($wantsEu && $triageResult->needsEu)
+                || ($wantsGerman && $triageResult->needsGerman);
 
             if ($needsOllama && empty($ollamaEmbedding)) {
                 try {
+                    $sourceStartedAt = microtime(true);
                     $ollamaText     = $searchTerms ?: $userQuestion;
                     $ollamaCacheKey = 'ollama_embed_' . md5($ollamaText . config('ollama.embedding_model', 'bge-m3'));
                     $ollamaEmbedding = Cache::remember($ollamaCacheKey, 86400, fn() => $this->matsneRetriever->embedQuery($ollamaText));
+                    $timings['shared_ollama_embedding'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: shared bge-m3 embedding ready');
                 } catch (\Throwable $e) {
+                    $timings['shared_ollama_embedding'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
                     Log::warning('Orchestrator: Ollama busy, skipping bge-m3 sources', ['error' => $e->getMessage()]);
                     $ollamaEmbedding = [];
                 }
@@ -243,63 +357,86 @@ class LegalChatOrchestratorService
             // ── Matsne semantic search — skipped when article detector found results ─
             if ($needsMatsneSemantic && !empty($ollamaEmbedding)) {
                 try {
+                    $sourceStartedAt = microtime(true);
                     $matsneResults = $this->matsneRetriever->retrieve(
                         $searchTerms ?: $userQuestion,
                         embedding:    $ollamaEmbedding,
                         domains:      $lawDomains,
                         relevantYear: $relevantYear,
                     );
+                    $timings['matsne_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: matsne retrieval', [
                         'count'   => count($matsneResults),
                         'domains' => $lawDomains,
                     ]);
                 } catch (\Throwable $e) {
+                    $timings['matsne_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
                     Log::warning('Orchestrator: matsne retrieval failed', ['error' => $e->getMessage()]);
                 }
             }
 
-            if ($triageResult->needsEu && !empty($ollamaEmbedding)) {
+            if ($wantsEu && $triageResult->needsEu && !empty($ollamaEmbedding)) {
                 try {
+                    $sourceStartedAt = microtime(true);
                     $euResults = $this->euRetriever->retrieve($searchTerms ?: $userQuestion, embedding: $ollamaEmbedding);
+                    $timings['eu_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: EU retrieval', ['count' => count($euResults)]);
                 } catch (\Throwable $e) {
+                    $timings['eu_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
                     Log::warning('Orchestrator: EU retrieval failed', ['error' => $e->getMessage()]);
                 }
             }
 
-            if ($triageResult->needsGerman && !empty($ollamaEmbedding)) {
+            if ($wantsGerman && $triageResult->needsGerman && !empty($ollamaEmbedding)) {
                 try {
+                    $sourceStartedAt = microtime(true);
                     $germanResults = $this->germanRetriever->retrieve($searchTerms ?: $userQuestion, embedding: $ollamaEmbedding);
+                    $timings['german_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: german retrieval', ['count' => count($germanResults)]);
                 } catch (\Throwable $e) {
+                    $timings['german_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
                     Log::warning('Orchestrator: german retrieval failed', ['error' => $e->getMessage()]);
                 }
             }
 
-            if ($triageResult->needsConstCourt && !empty($ollamaEmbedding)) {
+            if ($wantsConstCourt && $triageResult->needsConstCourt && !empty($ollamaEmbedding)) {
                 try {
+                    $sourceStartedAt = microtime(true);
                     $constCourtResults = $this->constCourtRetriever->retrieve($searchTerms ?: $userQuestion, $ollamaEmbedding);
+                    $timings['const_court_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: const_court retrieval', ['count' => count($constCourtResults)]);
                 } catch (\Throwable $e) {
+                    $timings['const_court_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
                     Log::warning('Orchestrator: const_court retrieval failed', ['error' => $e->getMessage()]);
                 }
             }
         }
+        $timings['source_retrieval_total'] = $this->elapsedMs($sourcesStartedAt);
 
         // ── 9. Rule extraction — Stage 1 of two-stage answering ──────────────
         // Extracts concrete rules (deadlines, thresholds) from retrieved matsne articles
         // so the answer generator doesn't default to training priors.
         $extractedRules = [];
-        if (!empty($matsneResults)) {
+        if (!empty($matsneResults) && $this->shouldExtractRules($triageResult, $userQuestion, $matsneResults)) {
             try {
+                $stageStartedAt = microtime(true);
                 $extractedRules = $this->ruleExtractor->extract($userQuestion, $matsneResults);
+                $timings['rule_extraction'] = $this->elapsedMs($stageStartedAt);
             } catch (\Throwable $e) {
+                $timings['rule_extraction'] = $this->elapsedMs($stageStartedAt ?? microtime(true));
                 Log::warning('Orchestrator: rule extractor failed', ['error' => $e->getMessage()]);
             }
+        } elseif (!empty($matsneResults)) {
+            $timings['rule_extraction'] = 0;
+            $debugFlags['rule_extraction_skipped'] = true;
+            $debugFlags['rule_extraction_skip_reason'] = 'fast_exact_article_without_concrete_rule_request';
         }
 
         // ── 10. Conversation history ──────────────────────────────────────────
+        $stageStartedAt = microtime(true);
         $history = $this->buildHistory($chat, $userMessage->id);
+        $timings['history_build'] = $this->elapsedMs($stageStartedAt);
+        $timings['prepare_total'] = $this->elapsedMs($startTime);
 
         return [
             'startTime'      => $startTime,
@@ -313,6 +450,7 @@ class LegalChatOrchestratorService
             'debugFlags'     => $debugFlags,
             'confidence'     => $confidence,
             'finalDecisions' => $enrichedDecisions,
+            'caseRanking'    => $this->caseRankingSummary($enrichedDecisions),
             'echrResults'    => $echrResults,
             'matsneResults'  => $matsneResults,
             'euResults'          => $euResults,
@@ -323,6 +461,7 @@ class LegalChatOrchestratorService
             'history'            => $history,
             'issueList'          => $issueList,
             'extractedRules'     => $extractedRules,
+            'timings_ms'         => $timings,
         ];
     }
 
@@ -331,24 +470,43 @@ class LegalChatOrchestratorService
      */
     public function finalize(Chat $chat, array $ctx, string $answerText): ChatMessage
     {
+        $finalizeStartedAt = microtime(true);
+        $timings = $ctx['timings_ms'] ?? [];
+
+        $stageStartedAt = microtime(true);
         $citations           = $this->buildCitations($ctx['finalDecisions']);
         $echrCitations       = $this->echrCitationBuilder->build($ctx['echrResults'] ?? []);
         $matsneCitations     = $this->buildMatsneCitations($ctx['matsneResults']     ?? []);
         $euCitations         = $this->buildEuCitations($ctx['euResults']             ?? []);
         $germanCitations     = $this->buildGermanCitations($ctx['germanResults']     ?? []);
         $constCourtCitations = $this->buildConstCourtCitations($ctx['constCourtResults'] ?? []);
+        $timings['citation_build'] = $this->elapsedMs($stageStartedAt);
 
+        $stageStartedAt = microtime(true);
         $issueTracking  = $this->detectAddressedIssues($ctx['issueList'], $answerText);
         $strategyText   = $ctx['mode'] === 'advocate'
             ? $this->extractStrategySection($answerText)
             : null;
+        $timings['issue_tracking'] = $this->elapsedMs($stageStartedAt);
 
         // ── Citation verification ─────────────────────────────────────────────
+        $stageStartedAt = microtime(true);
         $citationCheck = $this->citationVerifier->verify(
             $answerText,
             $ctx['finalDecisions'],
             $ctx['matsneResults'] ?? [],
         );
+        $timings['citation_verification'] = $this->elapsedMs($stageStartedAt);
+
+        $stageStartedAt = microtime(true);
+        $answerValidation = $this->answerValidator->validate(
+            answerText:     $answerText,
+            decisions:      $ctx['finalDecisions'],
+            matsneResults:  $ctx['matsneResults'] ?? [],
+            echrResults:    $ctx['echrResults'] ?? [],
+            extractedRules: $ctx['extractedRules'] ?? [],
+        );
+        $timings['answer_validation'] = $this->elapsedMs($stageStartedAt);
 
         $domesticConfidence = $ctx['confidence']->label;
         $matsneConfidence   = !empty($ctx['matsneResults']) ? 'high' : 'none';
@@ -358,6 +516,7 @@ class LegalChatOrchestratorService
         if ($overallConfidence === 'none' && ($matsneConfidence === 'high' || $echrConfidence === 'high')) {
             $overallConfidence = 'medium';
         }
+        $timings['finalize_before_save'] = $this->elapsedMs($finalizeStartedAt);
 
         return ChatMessage::create([
             'chat_id' => $chat->id,
@@ -394,16 +553,23 @@ class LegalChatOrchestratorService
                 // ── Retrieval metadata ────────────────────────────────────────
                 'retrieval_mode'       => $this->resolveMode($ctx['intent'], $ctx['retrieval']),
                 'answer_mode'          => $ctx['mode'],
+                'query_complexity'     => [
+                    'score'   => $ctx['triageResult']->complexityScore,
+                    'level'   => $ctx['triageResult']->complexityLevel,
+                    'reasons' => $ctx['triageResult']->complexityReasons,
+                ],
                 'sources_active'       => $ctx['sourcePlan']->sourcesActive(),
                 'matched_case_ids'     => $ctx['retrieval']->matchedCaseIds,
                 'matched_case_numbers' => $ctx['retrieval']->matchedCaseNumbers,
                 'relevance_scores'     => $ctx['retrieval']->relevanceScores,
+                'case_relevance_ranking' => $ctx['caseRanking'] ?? [],
                 'used_chunk_count'     => $ctx['retrieval']->usedChunkCount,
                 'used_case_count'      => count($ctx['finalDecisions']),
                 'total_meta_found'     => $ctx['retrieval']->totalMetaFound,
                 'search_query_used'    => $ctx['parsedQuery']?->terms ?? $ctx['userQuestion'],
                 'parsed_filters'       => $ctx['parsedQuery']?->toArray() ?? [],
                 'pipeline_ms'          => (int) ((microtime(true) - $ctx['startTime']) * 1000),
+                'timings_ms'           => $timings,
                 'debug'                => $ctx['debugFlags'],
 
                 // ── Issue Spotter ─────────────────────────────────────────────
@@ -424,6 +590,11 @@ class LegalChatOrchestratorService
                     'hallucinated'       => $citationCheck['hallucinated'],
                     'hallucinated_count' => $citationCheck['hallucinated_count'],
                 ],
+
+                // ── Answer validation ─────────────────────────────────────
+                'answer_validation' => $answerValidation,
+                'answer_validation_verdict' => $answerValidation['verdict'],
+                'answer_validation_score' => $answerValidation['score'],
 
                 // ── LLM-as-Judge evaluation (filled later via runEval) ───────
                 'eval' => null,
@@ -553,28 +724,270 @@ class LegalChatOrchestratorService
 
     // ── Pipeline ──────────────────────────────────────────────────────────────
 
+    private function shouldUseSemanticNormSupplement(TriageResult $triage, array $matsneResults, string $userQuestion): bool
+    {
+        if (!$triage->isFastPath()) {
+            return true;
+        }
+
+        if (!$this->hasExactArticleReference($userQuestion)) {
+            return true;
+        }
+
+        return empty($this->extractableRuleDocs($matsneResults));
+    }
+
+    private function shouldExtractRules(TriageResult $triage, string $userQuestion, array $matsneResults): bool
+    {
+        $articleDocs = $this->extractableRuleDocs($matsneResults);
+        if (empty($articleDocs)) {
+            return false;
+        }
+
+        if (!$triage->isFastPath()) {
+            return true;
+        }
+
+        if (!$this->hasExactArticleReference($userQuestion)) {
+            return true;
+        }
+
+        if ($this->hasConcreteRuleQuestion($userQuestion)) {
+            return true;
+        }
+
+        return count($articleDocs) > 2;
+    }
+
+    private function hasExactArticleReference(string $question): bool
+    {
+        return (bool) preg_match(
+            '/(?:მუხლ\p{L}*|article|art\.?)\D{0,12}\d{1,4}|\d{1,4}\D{0,12}(?:მუხლ\p{L}*|article|art\.?)/iu',
+            $question,
+        );
+    }
+
+    private function hasConcreteRuleQuestion(string $question): bool
+    {
+        $lower = mb_strtolower($question);
+        $signals = [
+            'ვადა',
+            'დღე',
+            'თვე',
+            'წელი',
+            'რამდენ',
+            'ოდენობ',
+            'პროცენტ',
+            'თანხ',
+            'ზღვარ',
+            'მოთხოვნ',
+            'წინაპირობ',
+            'პროცედურ',
+            'შედეგ',
+            'სანქც',
+            'პასუხისმგებლ',
+            'ბათილ',
+            'ვალდებულ',
+            'deadline',
+            'threshold',
+            'amount',
+            'procedure',
+            'consequence',
+            'liability',
+        ];
+
+        foreach ($signals as $signal) {
+            if (str_contains($lower, $signal)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function extractableRuleDocs(array $matsneResults): array
+    {
+        return array_values(array_filter(
+            $matsneResults,
+            fn (array $result) => in_array(
+                $result['_source'] ?? '',
+                ['article_detector', 'semantic_article', 'concept_detector'],
+                true,
+            ),
+        ));
+    }
+
+    private function courtRankingQuery(TriageResult $triage, ?string $searchTerms, string $userQuestion): string
+    {
+        $candidates = [
+            $this->extractLabeledLegalIssue($userQuestion),
+            trim((string) $searchTerms),
+            trim((string) $triage->searchQuery),
+        ];
+
+        foreach ($candidates as $candidate) {
+            $candidate = $this->normalizeFocusedSearchText((string) $candidate);
+            if ($candidate === '') {
+                continue;
+            }
+
+            if (!$this->isUsableExtractedSearchText($userQuestion, $candidate)) {
+                continue;
+            }
+
+            if (!$this->isSubstantiveCourtSearchText($candidate)) {
+                continue;
+            }
+
+            return $candidate;
+        }
+
+        return $userQuestion;
+    }
+
+    private function shouldUseFocusedCourtQuery(TriageResult $triage, string $focusedQuery, string $userQuestion): bool
+    {
+        if ($this->normalizedEmbeddingText($focusedQuery) === $this->normalizedEmbeddingText($userQuestion)) {
+            return false;
+        }
+
+        if (!$this->isUsableExtractedSearchText($userQuestion, $focusedQuery)) {
+            return false;
+        }
+
+        if (!$this->isSubstantiveCourtSearchText($focusedQuery)) {
+            return false;
+        }
+
+        $originalLength = mb_strlen(trim($userQuestion));
+        $focusedLength = mb_strlen(trim($focusedQuery));
+
+        if ($originalLength <= 500 && $triage->complexityLevel !== 'full') {
+            return false;
+        }
+
+        return $focusedLength <= max(700, (int) floor($originalLength * 0.85));
+    }
+
+    private function extractLabeledLegalIssue(string $question): ?string
+    {
+        $lines = preg_split('/\R/u', $question) ?: [];
+        $captureNext = false;
+        $cues = [
+            'ძირითადი სამართლებრივი საკითხი',
+            'მთავარი სამართლებრივი საკითხი',
+            'სამართლებრივი საკითხი ასეთია',
+            'საქმის არსი',
+            'კითხვა',
+        ];
+
+        foreach ($lines as $index => $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+
+            if ($captureNext) {
+                return $this->appendNearbyCategorySignal($this->stripIssueLineNoise($line), $lines, $index);
+            }
+
+            $lower = mb_strtolower($line);
+            foreach ($cues as $cue) {
+                if (!str_contains($lower, $cue)) {
+                    continue;
+                }
+
+                $afterColon = preg_split('/[:：]/u', $line, 2);
+                if (count($afterColon) === 2 && trim($afterColon[1]) !== '') {
+                    return $this->appendNearbyCategorySignal($this->stripIssueLineNoise($afterColon[1]), $lines, $index);
+                }
+
+                $captureNext = true;
+                break;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Preserve an adjacent dispute-category line because it often carries the
+     * domain/case-type signal (tax/admin/civil) that a short legal issue omits.
+     *
+     * @param array<int, string> $lines
+     */
+    private function appendNearbyCategorySignal(string $issue, array $lines, int $issueLineIndex): string
+    {
+        for ($i = $issueLineIndex + 1; $i <= min(count($lines) - 1, $issueLineIndex + 3); $i++) {
+            $line = trim((string) $lines[$i]);
+            if ($line === '') {
+                continue;
+            }
+
+            if (preg_match('/^დავის\s+(?:სავარაუდო\s+)?(?:მიმართულება\/)?კატეგორია\s*:/u', $line)) {
+                return trim($issue . "\n" . $line);
+            }
+
+            break;
+        }
+
+        return $issue;
+    }
+
+    private function stripIssueLineNoise(string $line): string
+    {
+        $line = preg_replace('/\s*დავის\s+(?:სავარაუდო\s+)?(?:მიმართულება\/)?კატეგორია\s*:.*/u', '', $line) ?? $line;
+
+        return trim($line);
+    }
+
+    private function normalizeFocusedSearchText(string $text): string
+    {
+        $text = trim($text);
+        $text = preg_replace('/[ \t]+/u', ' ', $text) ?? $text;
+
+        return trim(preg_replace('/\R{2,}/u', "\n", $text) ?? $text);
+    }
+
     private function runPipeline(TriageResult $triage, string $userQuestion, array $sources = []): array
     {
+        $timings = [];
         $debugFlags = [
             'hyde_used'          => false,
             'raw_embedding_used' => true,
             'retrieval_strategy' => 'none',
             'domain_classified'  => $triage->caseType,
             'case_type_filter'   => $triage->caseTypeFilter(),
+            'query_complexity_level' => $triage->complexityLevel,
+            'query_complexity_score' => $triage->complexityScore,
+            'query_complexity_reasons' => $triage->complexityReasons,
+            'extracted_query_discarded' => false,
         ];
 
         if ($triage->isChatOnly()) {
-            return [RetrievalResult::empty(), null, $debugFlags, null, null];
+            return [RetrievalResult::empty(), null, $debugFlags, null, null, $timings];
         }
 
         // No court source — skip court retrieval, still need parsedQuery for matsne routing
         if (!$triage->needsCases) {
+            $stageStartedAt = microtime(true);
             $parsedQuery = $this->queryParser->parse($userQuestion, $triage->searchQuery);
+            $timings['query_parse'] = $this->elapsedMs($stageStartedAt);
             $debugFlags['retrieval_strategy'] = 'norms_only';
-            return [RetrievalResult::empty(), $parsedQuery, $debugFlags, $triage->searchQuery, null];
+            return [RetrievalResult::empty(), $parsedQuery, $debugFlags, $triage->searchQuery, null, $timings];
         }
 
+        $stageStartedAt = microtime(true);
         $parsedQuery = $this->queryParser->parse($userQuestion, $triage->searchQuery);
+        $rawSearchText = trim((string) ($triage->searchQuery ?: $parsedQuery->terms));
+        if (!$this->isUsableExtractedSearchText($userQuestion, $rawSearchText)) {
+            $debugFlags['extracted_query_discarded'] = $rawSearchText !== '';
+            $parsedQuery = $this->queryParser->parse($userQuestion, $userQuestion);
+        }
+        $timings['query_parse'] = $this->elapsedMs($stageStartedAt);
 
         Log::debug('Orchestrator: parsed query', [
             'terms'     => $parsedQuery->terms,
@@ -582,34 +995,120 @@ class LegalChatOrchestratorService
             'filters'   => $parsedQuery->toArray(),
         ]);
 
-        // Ollama bge-m3 embedding (cached by search query)
-        $ollamaText      = $triage->searchQuery ?: $userQuestion;
-        $ollamaCacheKey  = 'ollama_embed_' . md5($ollamaText . config('ollama.embedding_model', 'bge-m3'));
-        $ollamaEmbedding = Cache::remember($ollamaCacheKey, 86400, fn() => $this->ollamaEmbedder->embed($ollamaText));
+        // Long casus text often contains procedural boilerplate and task wording.
+        // For court retrieval, use the extracted/labeled legal issue as the main
+        // semantic signal when it is substantive; keep the full question only for
+        // pasted-text/fingerprint fallbacks and final answer generation.
+        $courtSearchText = $this->courtRankingQuery($triage, $parsedQuery->terms, $userQuestion);
+        $useFocusedCourtQuery = $this->shouldUseFocusedCourtQuery($triage, $courtSearchText, $userQuestion);
+        $debugFlags['focused_court_query'] = mb_substr($courtSearchText, 0, 500);
+        $debugFlags['focused_court_query_chars'] = mb_strlen($courtSearchText);
+        $debugFlags['focused_court_query_used'] = $useFocusedCourtQuery;
+
+        $stageStartedAt = microtime(true);
+        $courtEmbeddingText = $useFocusedCourtQuery ? $courtSearchText : $userQuestion;
+        $courtEmbeddingKey  = 'ollama_embed_' . md5($courtEmbeddingText . config('ollama.embedding_model', 'bge-m3'));
+        $courtEmbedding     = Cache::remember($courtEmbeddingKey, 86400, fn() => $this->ollamaEmbedder->embed($courtEmbeddingText));
+        $timings['court_embedding'] = $this->elapsedMs($stageStartedAt);
+
+        $searchEmbedding = null;
+        $searchEmbeddingText = $useFocusedCourtQuery
+            ? ''
+            : trim((string) ($triage->searchQuery ?: $parsedQuery->terms));
+        if ($debugFlags['extracted_query_discarded']) {
+            $searchEmbeddingText = '';
+        }
+        if ($searchEmbeddingText !== '' && $this->normalizedEmbeddingText($searchEmbeddingText) !== $this->normalizedEmbeddingText($userQuestion)) {
+            $stageStartedAt = microtime(true);
+            $searchEmbeddingKey = 'ollama_embed_' . md5($searchEmbeddingText . config('ollama.embedding_model', 'bge-m3'));
+            $searchEmbedding = Cache::remember($searchEmbeddingKey, 86400, fn() => $this->ollamaEmbedder->embed($searchEmbeddingText));
+            $timings['search_embedding'] = $this->elapsedMs($stageStartedAt);
+        }
+
+        $ollamaEmbedding = $searchEmbedding ?: $courtEmbedding;
+        $debugFlags['court_embedding_source'] = $useFocusedCourtQuery ? 'focused_query' : 'full_question';
+        $debugFlags['full_question_embedding_used'] = !$useFocusedCourtQuery;
+        $debugFlags['extracted_query_embedding_used'] = $searchEmbedding !== null;
 
         // Fingerprint embedding — long queries (>500 chars) may be pasted decision text.
         // Embed the first 300 chars to detect near-duplicate chunks at threshold 0.90.
         $fingerprintEmbedding = null;
         if (mb_strlen($userQuestion) > 500) {
-            $fpText = mb_substr($userQuestion, 0, 300);
+            $stageStartedAt = microtime(true);
+            $fpText = mb_substr($userQuestion, 0, 500);
             $fpKey  = 'fp_embed_' . md5($fpText . config('ollama.embedding_model', 'bge-m3'));
             $fingerprintEmbedding = Cache::remember($fpKey, 86400, fn() => $this->ollamaEmbedder->embed($fpText));
+            $timings['fingerprint_embedding'] = $this->elapsedMs($stageStartedAt);
         }
 
         $strategy = $parsedQuery->hasCaseNumber() ? 'case_number+vector' : 'vector+metadata';
         $debugFlags['retrieval_strategy'] = $strategy;
 
+        $stageStartedAt = microtime(true);
         $retrieval = $this->retriever->retrieve(
-            rawEmbedding:         $ollamaEmbedding,
-            searchTerms:          $parsedQuery->terms,
+            rawEmbedding:         $courtEmbedding,
+            searchTerms:          $courtSearchText,
             originalQuery:        $userQuestion,
-            hydeEmbedding:        null,
+            hydeEmbedding:        $searchEmbedding,
             parsed:               $parsedQuery,
             caseType:             $triage->caseTypeFilter(),
             fingerprintEmbedding: $fingerprintEmbedding,
         );
+        $timings['case_retrieval'] = $this->elapsedMs($stageStartedAt);
 
-        return [$retrieval, $parsedQuery, $debugFlags, $triage->searchQuery, $ollamaEmbedding];
+        return [$retrieval, $parsedQuery, $debugFlags, $parsedQuery->terms, $ollamaEmbedding, $timings];
+    }
+
+    private function isUsableExtractedSearchText(string $original, string $searchText): bool
+    {
+        $searchText = trim($searchText);
+        if ($searchText === '') {
+            return false;
+        }
+
+        if ($this->normalizedEmbeddingText($searchText) === $this->normalizedEmbeddingText($original)) {
+            return true;
+        }
+
+        $originalTokens = $this->searchGuardTokens($original);
+        $searchTokens = $this->searchGuardTokens($searchText);
+
+        if (empty($searchTokens)) {
+            return false;
+        }
+
+        return count(array_intersect($originalTokens, $searchTokens)) > 0;
+    }
+
+    private function isSubstantiveCourtSearchText(string $searchText): bool
+    {
+        if ($this->hasExactArticleReference($searchText)) {
+            return true;
+        }
+
+        return count($this->searchGuardTokens($searchText)) >= 2;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function searchGuardTokens(string $text): array
+    {
+        $tokens = preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower($text)) ?: [];
+        $stopWords = [
+            'და', 'ან', 'რომ', 'არის', 'იყო', 'თუ', 'რა', 'რას', 'როგორ', 'საკითხი',
+            'სასამართლო', 'სასამართლოს', 'საქმე', 'საქმეში', 'გადაწყვეტილება', 'გადაწყვეტილების',
+            'სარჩელი', 'საჩივარი', 'კაზუსი', 'კლიენტი', 'მხარე', 'მხარეებს', 'მთავარი',
+            'სამართლებრივი', 'დავალება', 'წყარო', 'წყაროები', 'რელევანტური',
+            'პრაქტიკა', 'უზენაესი', 'მოძებნე', 'გამოყავი', 'დასკვნა', 'პასუხი',
+        ];
+
+        $tokens = array_filter($tokens, fn (string $token) => mb_strlen($token) >= 4 && !in_array($token, $stopWords, true));
+
+        return array_values(array_unique(array_map(
+            fn (string $token) => mb_substr($token, 0, min(7, mb_strlen($token))),
+            $tokens,
+        )));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -638,12 +1137,25 @@ class LegalChatOrchestratorService
         return $retrieval->isEmpty() ? 'no_results' : 'grounded';
     }
 
+    private function elapsedMs(float $startedAt): int
+    {
+        return (int) round((microtime(true) - $startedAt) * 1000);
+    }
+
+    private function normalizedEmbeddingText(string $text): string
+    {
+        $text = mb_strtolower(trim($text));
+
+        return trim(preg_replace('/\s+/u', ' ', $text) ?? $text);
+    }
+
     private function buildMatsneCitations(array $matsneResults): array
     {
         return array_map(fn(array $r) => [
             'type'               => 'matsne',
             'matsne_id'          => $r['matsne_id'],
             'title'              => $r['title'],
+            'article_num'        => $r['_article_num'] ?? null,
             'doc_type'           => $r['doc_type'],
             'issuer'             => $r['issuer'],
             'is_active'          => $r['is_active'],
@@ -708,6 +1220,8 @@ class LegalChatOrchestratorService
     private function buildCitations(array $decisions): array
     {
         return array_map(function (array $d) {
+            $caseType = $d['case_type'] ?? 'administrative';
+
             return [
                 'case_id'         => $d['case_id'],
                 'case_num'        => $d['case_num'],
@@ -720,9 +1234,62 @@ class LegalChatOrchestratorService
                 'dispute_subject' => $d['dispute_subject'],
                 'result'          => $d['result'],
                 'relevance_score' => $d['relevance_score'],
-                'case_type'       => $d['case_type'] ?? 'administrative',
-                'url'             => "/fullcase/{$d['case_type']}/{$d['case_id']}",
+                'semantic_relevance_score' => $d['semantic_relevance_score'] ?? null,
+                'semantic_relevance_confidence' => $d['semantic_relevance']['confidence'] ?? null,
+                'ranking_explanation' => $d['ranking_explanation'] ?? null,
+                'answer_role'     => $d['answer_role'] ?? null,
+                'answer_role_label' => $d['answer_role_label'] ?? null,
+                'answer_rank'     => $d['answer_rank'] ?? null,
+                'case_type'       => $caseType,
+                'url'             => "/fullcase/{$caseType}/{$d['case_id']}",
             ];
         }, $decisions);
+    }
+
+    /**
+     * Marks top decisions as main authorities and the rest as similar support.
+     *
+     * @param array<int, array<string, mixed>> $decisions
+     * @return array<int, array<string, mixed>>
+     */
+    private function annotateDecisionRoles(array $decisions): array
+    {
+        $primaryLimit = max(1, (int) config('openai.primary_case_limit', 2));
+
+        return array_values(array_map(function (array $decision, int $index) use ($primaryLimit) {
+            $isExactCaseCardIssue = ($decision['semantic_relevance']['case_card_legal_issue_exact'] ?? false) === true;
+            $role = ($index < $primaryLimit || $isExactCaseCardIssue) ? 'primary' : 'supporting';
+
+            $decision['answer_rank'] = $index + 1;
+            $decision['answer_role'] = $role;
+            $decision['answer_role_label'] = $role === 'primary'
+                ? 'მთავარი შესაბამისი საქმე'
+                : 'დამხმარე მსგავსი საქმე';
+            $decision['usage_instruction'] = $role === 'primary'
+                ? 'Use as a main authority for the legal answer.'
+                : 'Use only as supporting analogous practice if it confirms the same legal issue.';
+
+            return $decision;
+        }, $decisions, array_keys($decisions)));
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $decisions
+     * @return array<int, array<string, mixed>>
+     */
+    private function caseRankingSummary(array $decisions): array
+    {
+        return array_map(fn (array $d) => [
+            'case_id' => $d['case_id'] ?? null,
+            'case_num' => $d['case_num'] ?? null,
+            'answer_role' => $d['answer_role'] ?? null,
+            'answer_rank' => $d['answer_rank'] ?? null,
+            'semantic_relevance_score' => $d['semantic_relevance_score'] ?? null,
+            'semantic_relevance' => $d['semantic_relevance'] ?? null,
+            'ranking_explanation' => $d['ranking_explanation'] ?? null,
+            'match_sources' => $d['match_sources'] ?? [],
+            'retrieval_relevance_score' => $d['relevance_score'] ?? null,
+            'combined_score' => $d['combined_score'] ?? null,
+        ], array_slice($decisions, 0, 12));
     }
 }

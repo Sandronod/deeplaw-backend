@@ -3,6 +3,7 @@
 namespace App\Services\AI;
 
 use App\DTOs\ConfidenceResult;
+use App\DTOs\EchrResult;
 use App\DTOs\IssueList;
 use App\DTOs\LawResult;
 use App\DTOs\TriageResult;
@@ -63,7 +64,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         array           $euResults = [],
         array           $germanResults = [],
         array           $constCourtResults = [],
-        array           $sources = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        array           $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'],
         ?IssueList      $issueList = null,
         ?TriageResult   $triage = null,
         array           $extractedRules = [],
@@ -219,9 +220,13 @@ ACTIVE MODE instruction (ქვემოთ) თუ სხვა სტრუქ
 **2. 📋 გამოყენებული წყაროები** — ONLY if material was retrieved:
 
    ⚖️ **სასამართლო გადაწყვეტილებები** (თუ CONTEXT-ში გადაწყვეტილებები მოიძებნა):
+      - თუ საქმე მონიშნულია PRIMARY AUTHORITY-ად — გამოიყენე როგორც მთავარი პრაქტიკა
+      - თუ საქმე მონიშნულია SUPPORTING ANALOGY-ად — გამოიყენე მხოლოდ დამხმარე მსგავს პრაქტიკად
       - ჩამოთვალე: case_num | სასამართლო | წელი
       - ყოველ საქმეზე: რა დაადგინა (1-2 წინადადება)
       - 🔗 ლინკი
+      - ❗ თუ PRIMARY AUTHORITY არსებობს, არ დაწერო "ბაზაში ვერ მოიძებნა"; cite case_num და მიუთითე, პირდაპირია თუ მხოლოდ ანალოგიური.
+      - ❗ ყველა PRIMARY AUTHORITY case_num ზუსტად უნდა გამოჩნდეს პასუხში; არც ერთი primary case არ გამოტოვო.
 
    📕 **მაცნე / კანონმდებლობა** (თუ CONTEXT-ში matsne/law დოკუმენტები მოიძებნა):
       - ჩამოთვალე: სათაური | ტიპი | სტატუსი
@@ -808,8 +813,16 @@ BLOCK;
             $echrBlock = ["RETRIEVED ECHR CASES:\n"];
             foreach ($echrResults as $i => $echr) {
                 $num         = $i + 1;
-                $articles    = !empty($echr['echr_articles']) ? implode(', ', $echr['echr_articles']) : 'N/A';
-                $importance  = match ($echr['importance'] ?? null) {
+                $title       = $echr instanceof EchrResult ? $echr->title : ($echr['title'] ?? '');
+                $application = $echr instanceof EchrResult ? $echr->applicationNumber : ($echr['application_number'] ?? null);
+                $date        = $echr instanceof EchrResult ? $echr->judgmentDate : ($echr['judgment_date'] ?? null);
+                $type        = $echr instanceof EchrResult ? $echr->documentType : ($echr['document_type'] ?? null);
+                $articleList = $echr instanceof EchrResult ? $echr->echrArticles : ($echr['echr_articles'] ?? []);
+                $importanceValue = $echr instanceof EchrResult ? $echr->importance : ($echr['importance'] ?? null);
+                $url         = $echr instanceof EchrResult ? $echr->sourceUrl : ($echr['url'] ?? $echr['source_url'] ?? '');
+                $excerpt     = $echr instanceof EchrResult ? $echr->excerpt : ($echr['excerpt'] ?? '');
+                $articles    = !empty($articleList) ? implode(', ', $articleList) : 'N/A';
+                $importance  = match ($importanceValue) {
                     1 => 'Key Case',
                     2 => 'High Importance',
                     3 => 'Medium',
@@ -819,15 +832,15 @@ BLOCK;
 
                 $echrBlock[] = <<<BLOCK
 --- ECHR CASE #{$num} ---
-Title: {$echr['title']}
-Application No: {$echr['application_number']}
-Date: {$echr['judgment_date']}
-Type: {$echr['document_type']} | Importance: {$importance}
+Title: {$title}
+Application No: {$application}
+Date: {$date}
+Type: {$type} | Importance: {$importance}
 Articles: {$articles}
-URL: {$echr['url']}
+URL: {$url}
 
 EXCERPT:
-{$echr['excerpt']}
+{$excerpt}
 --- END ECHR CASE #{$num} ---
 BLOCK;
             }
@@ -848,6 +861,16 @@ BLOCK;
 
         foreach ($decisions as $i => $d) {
             $num  = $i + 1;
+            $role = $d['answer_role'] ?? ($i < 2 ? 'primary' : 'supporting');
+            $roleLabel = $role === 'primary' ? 'PRIMARY AUTHORITY' : 'SUPPORTING ANALOGY';
+            $roleInstruction = $d['usage_instruction'] ?? (
+                $role === 'primary'
+                    ? 'Use as a main authority for the legal answer.'
+                    : 'Use only as supporting analogous practice if it confirms the same legal issue.'
+            );
+            $mandatoryCitation = $role === 'primary' && !empty($d['case_num'])
+                ? "\nMANDATORY_CITATION: final answer must mention this exact case_num: {$d['case_num']}"
+                : '';
             $date = $d['case_date'] instanceof \Carbon\Carbon
                 ? $d['case_date']->format('Y-m-d')
                 : ($d['case_date'] ?? 'N/A');
@@ -905,11 +928,29 @@ BLOCK;
             $combinedScore = isset($d['combined_score'])
                 ? " | Combined: {$d['combined_score']}"
                 : '';
+            $semanticSection = '';
+            if (!empty($d['semantic_relevance'])) {
+                $sem = $d['semantic_relevance'];
+                $semanticSection = sprintf(
+                    "\nSTRUCTURED RELEVANCE: %s/100 | confidence=%s | legal_issue=%s | holding=%s | facts=%s | articles=%s | procedure=%s | retrieval_rank=%s | role=%s | reason=%s",
+                    $d['semantic_relevance_score'] ?? 'N/A',
+                    $sem['confidence'] ?? 'N/A',
+                    $sem['legal_issue_match'] ?? 'N/A',
+                    $sem['holding_match'] ?? 'N/A',
+                    $sem['fact_pattern_match'] ?? 'N/A',
+                    $sem['article_match'] ?? 'N/A',
+                    $sem['procedural_match'] ?? 'N/A',
+                    $sem['retrieval_rank_signal'] ?? 'N/A',
+                    $roleLabel,
+                    $d['ranking_explanation'] ?? 'N/A',
+                );
+            }
 
             $blocks[] = <<<BLOCK
---- DECISION #{$num} ---
+--- DECISION #{$num} ({$roleLabel}) ---
 {$meta}
-Relevance: {$d['relevance_score']}{$combinedScore} | Chunks: {$d['chunk_count']} | Mode: {$status}{$authorityNote}{$outlierNote}{$trendNote}{$qualityNote}{$keyFactsSection}{$evidenceSection}
+USE ROLE: {$roleLabel} — {$roleInstruction}
+Relevance: {$d['relevance_score']}{$combinedScore} | Chunks: {$d['chunk_count']} | Mode: {$status}{$mandatoryCitation}{$semanticSection}{$authorityNote}{$outlierNote}{$trendNote}{$qualityNote}{$keyFactsSection}{$evidenceSection}
 
 TEXT:
 {$textToSend}
@@ -1040,10 +1081,23 @@ BLOCK;
     {
         $excerpt  = $d['excerpt']   ?? '';
         $fullText = $d['full_text'] ?? '';
+        $role     = $d['answer_role'] ?? null;
+
+        if ($role === 'supporting') {
+            $limit = $mode === 'find' ? 1200 : 2000;
+            $text = mb_substr(!empty($excerpt) ? $excerpt : $fullText, 0, $limit);
+            return [$text, 'SUPPORTING-COMPACT'];
+        }
 
         if ($mode === 'find' || $totalDecisions > 5) {
             $text = mb_substr(!empty($excerpt) ? $excerpt : $fullText, 0, 1200);
             return [$text, 'COMPACT'];
+        }
+
+        if ($totalDecisions > 3 && $mode !== 'summarize') {
+            $limit = min((int) config('openai.max_chars_per_decision', 7000), 7000);
+            $text = mb_substr(!empty($excerpt) ? $excerpt : $fullText, 0, $limit);
+            return [$text, 'PRIMARY-CONTEXT'];
         }
 
         if ($mode === 'summarize') {
@@ -1094,7 +1148,7 @@ BLOCK;
         array           $euResults = [],
         array           $germanResults = [],
         array           $constCourtResults = [],
-        array           $sources = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        array           $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'],
         ?IssueList      $issueList = null,
         ?TriageResult   $triage = null,
         array           $extractedRules = [],

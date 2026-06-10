@@ -104,7 +104,7 @@ class LegalChatController extends Controller
             $result = $this->orchestrator->handle(
                 chat:         $chat,
                 userQuestion: $request->input('message'),
-                sources:      $request->input('sources', ['court', 'matsne', 'eu', 'german', 'const_court']),
+                sources:      $request->input('sources', ['court', 'matsne', 'echr', 'eu', 'german', 'const_court']),
             );
 
             return response()->json([
@@ -163,7 +163,7 @@ class LegalChatController extends Controller
                 $ctx = $this->orchestrator->prepare(
                     chat:         $chat,
                     userQuestion: $request->input('message'),
-                    sources:      $request->input('sources', ['court', 'matsne', 'eu', 'german', 'const_court']),
+                    sources:      $request->input('sources', ['court', 'matsne', 'echr', 'eu', 'german', 'const_court']),
                 );
 
                 // ── Stage 2: stream LLM tokens ────────────────────────────────
@@ -200,6 +200,7 @@ class LegalChatController extends Controller
                 $emit('done', [
                     'message_id'      => $assistantMessage->id,
                     'citations'        => $assistantMessage->meta['citations']          ?? [],
+                    'echr_citations'   => $assistantMessage->meta['echr_citations']     ?? [],
                     'law_citations'    => $assistantMessage->meta['law_citations']      ?? [],
                     'matsne_citations' => $assistantMessage->meta['matsne_citations']   ?? [],
                     'eu_citations'     => $assistantMessage->meta['eu_citations']       ?? [],

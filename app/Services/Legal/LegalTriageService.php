@@ -77,8 +77,8 @@ class LegalTriageService
         ]);
 
         // ── 6. Case type (DB filter) ──────────────────────────────────────────
-        $primaryDomain = $domains[0] ?? null;
-        $caseType      = $this->domainToCaseType($primaryDomain);
+        $caseType = $this->resolveCaseType($domains);
+        $caseType = $this->relaxCivilFilterForPublicLawSignals($question, $caseType);
 
         // ── 7. Temporal year from question text ───────────────────────────────
         $temporalYear = null;
@@ -97,15 +97,26 @@ class LegalTriageService
         $wantsConstCourt = empty($activeSources) || in_array('const_court', $activeSources);
         $wantsEu         = empty($activeSources) || in_array('eu',          $activeSources);
         $wantsGerman     = empty($activeSources) || in_array('german',      $activeSources);
+        $simpleDomesticNormLookup = $this->isSimpleDomesticNormLookup($question, $mode, $wantsMatsne);
 
         // სისხლის საქმეში EU/ConstCourt ნაკლებად გამოდგება
         $isCriminal = $caseType === 'criminal';
 
         $needsNorms      = $wantsMatsne;
-        $needsCases      = $wantsCourt;
-        $needsConstCourt = $wantsConstCourt && !$isCriminal;
-        $needsEu         = $wantsEu        && !$isCriminal;
-        $needsGerman     = $wantsGerman    && !$isCriminal;
+        $needsCases      = $wantsCourt      && !$simpleDomesticNormLookup;
+        $needsConstCourt = $wantsConstCourt && !$isCriminal && !$simpleDomesticNormLookup;
+        $needsEu         = $wantsEu         && !$isCriminal && !$simpleDomesticNormLookup;
+        $needsGerman     = $wantsGerman     && !$isCriminal && !$simpleDomesticNormLookup;
+
+        $complexity = $this->classifyComplexity(
+            question:      $question,
+            mode:          $mode,
+            domains:       $domains,
+            issueList:     $issueList,
+            needsNorms:    $needsNorms,
+            needsCases:    $needsCases,
+            activeSources: $activeSources,
+        );
 
         $result = new TriageResult(
             intent:          $intent,
@@ -120,7 +131,10 @@ class LegalTriageService
             needsEu:         $needsEu,
             needsGerman:     $needsGerman,
             temporalYear:    $temporalYear,
-            isComplex:       $issueList->isComplex || count($domains) > 1,
+            isComplex:       $issueList->isComplex || count($domains) > 1 || $complexity['level'] === 'full',
+            complexityScore:  $complexity['score'],
+            complexityLevel:  $complexity['level'],
+            complexityReasons: $complexity['reasons'],
         );
 
         Log::debug('Triage: complete', $result->toDebugArray());
@@ -139,5 +153,263 @@ class LegalTriageService
             'corporate', 'labor', 'procedure'             => 'civil',
             default                                       => null,
         };
+    }
+
+    private function resolveCaseType(array $domains): ?string
+    {
+        $substantiveDomains = array_values(array_filter(
+            $domains,
+            fn (string $domain) => !in_array($domain, ['procedure', 'echr'], true)
+        ));
+
+        if (empty($substantiveDomains)) {
+            return null;
+        }
+
+        $caseTypes = array_values(array_unique(array_filter(
+            array_map(fn (string $domain) => $this->domainToCaseType($domain), $substantiveDomains)
+        )));
+
+        return count($caseTypes) === 1 ? $caseTypes[0] : null;
+    }
+
+    private function relaxCivilFilterForPublicLawSignals(string $question, ?string $caseType): ?string
+    {
+        if ($caseType !== 'civil') {
+            return $caseType;
+        }
+
+        $lower = mb_strtolower($question);
+        $publicLawSignals = [
+            'ადმინისტრაც',
+            'სამინისტრო',
+            'სსიპ',
+            'საჯარო',
+            'მერია',
+            'საკრებულ',
+            'პოლიცი',
+            'ფინანსურ',
+            'შემოსავლების სამსახ',
+            'კომისი',
+            'სახელმწიფო ორგან',
+            'ადმინისტრაციული ორგან',
+        ];
+
+        foreach ($publicLawSignals as $signal) {
+            if (str_contains($lower, $signal)) {
+                return null;
+            }
+        }
+
+        return $caseType;
+    }
+
+    private function isSimpleDomesticNormLookup(string $question, string $mode, bool $wantsMatsne): bool
+    {
+        if (!$wantsMatsne || !$this->hasExactArticleReference($question)) {
+            return false;
+        }
+
+        if (!in_array($mode, ['explain', 'find', 'summarize'], true)) {
+            return false;
+        }
+
+        return !$this->hasCourtPracticeSignals($question)
+            && !$this->hasInternationalOrComparativeSignals($question)
+            && !$this->hasFactPatternSignals($question);
+    }
+
+    private function hasCourtPracticeSignals(string $question): bool
+    {
+        $lower = mb_strtolower($question);
+        $signals = [
+            'სასამართლო',
+            'პრაქტიკ',
+            'გადაწყვეტილ',
+            'საქმე',
+            'პრეცედენტ',
+            'უზენაეს',
+            'court',
+            'case law',
+            'decision',
+            'precedent',
+        ];
+
+        foreach ($signals as $signal) {
+            if (str_contains($lower, $signal)) {
+                return true;
+            }
+        }
+
+        return $this->hasExactCaseNumber($question);
+    }
+
+    private function hasInternationalOrComparativeSignals(string $question): bool
+    {
+        $lower = mb_strtolower($question);
+        $signals = [
+            'echr',
+            'სტრასბურგ',
+            'კონვენცი',
+            'ევრო',
+            'გერმან',
+            'შეადარ',
+            'compare',
+            'german',
+            'european',
+        ];
+
+        foreach ($signals as $signal) {
+            if (str_contains($lower, $signal)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array{score:int, level:string, reasons:array<int, string>}
+     */
+    private function classifyComplexity(
+        string $question,
+        string $mode,
+        array $domains,
+        IssueList $issueList,
+        bool $needsNorms,
+        bool $needsCases,
+        array $activeSources = [],
+    ): array {
+        $score = 40;
+        $reasons = [];
+        $length = mb_strlen(trim($question));
+        $domainCount = count(array_unique($domains));
+        $sourceCount = count($activeSources);
+        $hasExactArticle = $this->hasExactArticleReference($question);
+        $hasExactCase = $this->hasExactCaseNumber($question);
+
+        if ($length <= 160) {
+            $score -= 10;
+            $reasons[] = 'short_question';
+        } elseif ($length > 500) {
+            $score += 25;
+            $reasons[] = 'long_fact_pattern';
+        } elseif ($length > 250) {
+            $score += 15;
+            $reasons[] = 'medium_fact_pattern';
+        } elseif ($length > 160) {
+            $score += 8;
+            $reasons[] = 'expanded_question';
+        }
+
+        if ($hasExactArticle) {
+            $score -= 18;
+            $reasons[] = 'exact_article_reference';
+        }
+
+        if ($hasExactCase) {
+            $score -= 18;
+            $reasons[] = 'exact_case_number';
+        }
+
+        if ($issueList->issueCount >= 3 || $issueList->isComplex) {
+            $score += 22;
+            $reasons[] = 'multiple_issues';
+        } elseif ($issueList->issueCount > 0) {
+            $score += 8;
+            $reasons[] = 'issue_spotted';
+        }
+
+        if ($domainCount > 1) {
+            $score += 12;
+            $reasons[] = 'multiple_domains';
+        }
+
+        if ($needsNorms && $needsCases) {
+            $score += 8;
+            $reasons[] = 'norms_and_cases';
+        }
+
+        if ($sourceCount === 1) {
+            $score -= 8;
+            $reasons[] = 'single_source';
+        } elseif ($sourceCount > 2) {
+            $score += 5;
+            $reasons[] = 'multiple_sources';
+        }
+
+        if (in_array($mode, ['advise', 'advocate', 'compare'], true)) {
+            $score += $mode === 'compare' ? 15 : 12;
+            $reasons[] = "mode_{$mode}";
+        } elseif (in_array($mode, ['find', 'explain'], true)) {
+            $score -= 5;
+            $reasons[] = "mode_{$mode}";
+        }
+
+        if ($this->hasFactPatternSignals($question)) {
+            $score += 15;
+            $reasons[] = 'fact_pattern_or_strategy';
+        }
+
+        if (substr_count($question, '?') + substr_count($question, '？') > 1) {
+            $score += 8;
+            $reasons[] = 'multiple_questions';
+        }
+
+        $score = max(0, min(100, $score));
+        $level = match (true) {
+            $score <= 30 => 'fast',
+            $score >= 61 => 'full',
+            default      => 'normal',
+        };
+
+        return [
+            'score'   => $score,
+            'level'   => $level,
+            'reasons' => array_values(array_unique($reasons)),
+        ];
+    }
+
+    private function hasExactArticleReference(string $question): bool
+    {
+        return (bool) preg_match(
+            '/(?:მუხლ\p{L}*|article|art\.?)\D{0,12}\d{1,4}|\d{1,4}\D{0,12}(?:მუხლ\p{L}*|article|art\.?)/iu',
+            $question,
+        );
+    }
+
+    private function hasExactCaseNumber(string $question): bool
+    {
+        return (bool) preg_match('/[ა-ჰ]{1,4}-\d{1,5}(?:-\d{1,5})?\([^)]+\)/u', $question);
+    }
+
+    private function hasFactPatternSignals(string $question): bool
+    {
+        $lower = mb_strtolower($question);
+        $signals = [
+            'კაზუს',
+            'ფაქტ',
+            'შეაფას',
+            'სტრატეგ',
+            'შანს',
+            'სარჩელ',
+            'მოპასუხ',
+            'მოსარჩელ',
+            'როგორ გადაწყდება',
+            'რა უნდა ვქნა',
+            'შეიძლება თუ არა',
+            'legal strategy',
+            'fact pattern',
+            'can i',
+            'what should',
+        ];
+
+        foreach ($signals as $signal) {
+            if (str_contains($lower, $signal)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

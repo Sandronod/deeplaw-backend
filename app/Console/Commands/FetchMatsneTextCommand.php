@@ -143,7 +143,11 @@ class FetchMatsneTextCommand extends Command
         }
 
         $fullText = collect($articles)
-            ->map(fn($a) => trim(($a['article_title'] ?? '') . "\n" . ($a['content'] ?? '')))
+            ->map(fn($a) => trim(implode("\n", array_filter([
+                $a['article_num'] ?? '',
+                $a['article_title'] ?? '',
+                $a['content'] ?? '',
+            ]))))
             ->filter()
             ->implode("\n\n");
 

@@ -10,6 +10,10 @@ use Illuminate\Support\Facades\Log;
 
 class LegalCaseRetrieverService
 {
+    private const CASE_EMBEDDING_SCORE_BOOST = 1.15;
+    private const CASE_CARD_SCORE_FLOOR = 0.62;
+    private const CASE_CARD_SCORE_BOOST = 0.34;
+
     /**
      * Full retrieval pipeline.
      *
@@ -32,6 +36,7 @@ class LegalCaseRetrieverService
         $chunkLimit = config('openai.retrieval_chunk_limit', 20);
         $caseLimit  = config('openai.retrieval_case_limit', 3);
         $baseScore  = config('openai.retrieval_min_score', 0.65);
+        $rankingQuery = trim($searchTerms) !== '' ? $searchTerms : $originalQuery;
 
         // ── 0a. Resolve year filter ───────────────────────────────────────────
         $year = $parsed?->effectiveYear();
@@ -57,19 +62,28 @@ class LegalCaseRetrieverService
             ]);
         }
 
-        // ── 0c. Fingerprint search — near-duplicate detection for pasted text ──
+        // ── 0c. Lexical pasted-text search — exact-ish fallback for long excerpts ──
+        $pastedTextChunks = collect();
+        if (mb_strlen($originalQuery) > 500) {
+            $pastedTextChunks = LegalCase::pastedTextSearch($originalQuery, 10, $caseType);
+            Log::warning('Retriever: pasted-text lexical search', [
+                'hits' => $pastedTextChunks->count(),
+                'case_ids' => $pastedTextChunks->pluck('case_id')->unique()->values()->toArray(),
+            ]);
+        }
+
+        // ── 0d. Fingerprint search — near-duplicate detection for pasted text ──
         // When the user pastes a long decision excerpt, the first 300 chars are
         // embedded separately and searched at threshold 0.90. A hit means the
         // exact (or near-identical) chunk is in the DB — surface that case first.
         $fingerprintChunks = collect();
         if (!empty($fingerprintEmbedding)) {
-            $fingerprintChunks = LegalCase::vectorSearch($fingerprintEmbedding, 5, 0.90, null, $caseType);
-            if ($fingerprintChunks->isNotEmpty()) {
-                Log::debug('Retriever: fingerprint hit', [
-                    'cases' => $fingerprintChunks->pluck('case_id')->unique()->count(),
-                    'max'   => $fingerprintChunks->max('similarity'),
-                ]);
-            }
+            $fingerprintChunks = LegalCase::vectorSearch($fingerprintEmbedding, 5, 0.82, null, $caseType);
+            Log::warning('Retriever: fingerprint search', [
+                'hits' => $fingerprintChunks->count(),
+                'max'  => $fingerprintChunks->isNotEmpty() ? $fingerprintChunks->max('similarity') : null,
+                'case_ids' => $fingerprintChunks->pluck('case_id')->unique()->values()->toArray(),
+            ]);
         }
 
         // ── 1. Vector search — skipped when provider has no embeddings ───────
@@ -123,12 +137,47 @@ class LegalCaseRetrieverService
             ]);
         }
 
+        // ── 4a. Case-card lexical rescue ─────────────────────────────────────
+        // Structured case_card legal_issue/holding can be an exact match even
+        // when vector search ranks the case below the candidate cut.
+        $caseCardChunks = collect();
+        if (!empty($rankingQuery)) {
+            $caseCardChunks = LegalCase::caseCardKeywordSearch($rankingQuery, 30, $caseType);
+            if ($caseCardChunks->isNotEmpty()) {
+                Log::debug('Retriever: case-card keyword search', [
+                    'found' => $caseCardChunks->count(),
+                    'case_type' => $caseType,
+                    'case_ids' => $caseCardChunks->pluck('case_id')->values()->toArray(),
+                ]);
+            }
+        }
+
         // ── 4b. Case-level embedding search (concept-level) ───────────────────
         // Searches court_cases.case_embedding (bge-m3 over legal_issue + articles).
         // Finds cases where the legal concept matches even if raw chunk text doesn't.
         $caseChunks = collect();
         if ($useVector && !empty($rawEmbedding) && !$skipCaseVector) {
-            $caseChunks = LegalCase::caseEmbeddingSearch($rawEmbedding, 10, 0.45, $caseType);
+            $caseChunks = LegalCase::caseEmbeddingSearch($rawEmbedding, 30, 0.60, $caseType);
+            if ($hydeEmbedding !== null) {
+                $caseChunks = $this->mergeChunkResults(
+                    $caseChunks,
+                    LegalCase::caseEmbeddingSearch($hydeEmbedding, 30, 0.60, $caseType),
+                );
+            }
+            if ($caseType === null) {
+                foreach (['administrative', 'civil', 'criminal'] as $balancedType) {
+                    $caseChunks = $this->mergeChunkResults(
+                        $caseChunks,
+                        LegalCase::caseEmbeddingSearch($rawEmbedding, 30, 0.60, $balancedType),
+                    );
+                    if ($hydeEmbedding !== null) {
+                        $caseChunks = $this->mergeChunkResults(
+                            $caseChunks,
+                            LegalCase::caseEmbeddingSearch($hydeEmbedding, 30, 0.60, $balancedType),
+                        );
+                    }
+                }
+            }
             if ($caseChunks->isNotEmpty()) {
                 Log::debug('Retriever: case-level embedding search', [
                     'found'     => $caseChunks->count(),
@@ -137,9 +186,25 @@ class LegalCaseRetrieverService
             }
         }
 
-        // ── 5. Five-way merge: fingerprint (1.0) > case_num (1.0) > chunk-vector > case-vector > metadata (0.60) ──
+        // ── 5. Merge: pasted text / fingerprint / case_num dominate semantic hits ──
         $matchedChunks   = $vectorChunks;
         $existingCaseIds = $vectorChunks->pluck('case_id')->unique()->toArray();
+
+        if ($pastedTextChunks->isNotEmpty()) {
+            $newPastedIds = array_diff(
+                $pastedTextChunks->pluck('case_id')->unique()->toArray(),
+                $existingCaseIds
+            );
+            if (!empty($newPastedIds)) {
+                $extra = $pastedTextChunks->whereIn('case_id', $newPastedIds)->map(function ($c) {
+                    $c->similarity = max(0.60, (float) ($c->similarity ?? 0.0));
+                    $c->match_source = 'pasted_text';
+                    return $c;
+                });
+                $matchedChunks   = $matchedChunks->concat($extra);
+                $existingCaseIds = array_merge($existingCaseIds, $newPastedIds);
+            }
+        }
 
         if ($fingerprintChunks->isNotEmpty()) {
             $newFpIds = array_diff(
@@ -149,6 +214,7 @@ class LegalCaseRetrieverService
             if (!empty($newFpIds)) {
                 $extra = $fingerprintChunks->whereIn('case_id', $newFpIds)->map(function ($c) {
                     $c->similarity = 1.0;
+                    $c->match_source = 'fingerprint';
                     return $c;
                 });
                 $matchedChunks   = $matchedChunks->concat($extra);
@@ -164,6 +230,7 @@ class LegalCaseRetrieverService
             if (!empty($newCnIds)) {
                 $extra = $caseNumChunks->whereIn('case_id', $newCnIds)->map(function ($c) {
                     $c->similarity = 1.0;
+                    $c->match_source = 'case_number';
                     return $c;
                 });
                 $matchedChunks   = $matchedChunks->concat($extra);
@@ -184,6 +251,16 @@ class LegalCaseRetrieverService
             $existingCaseIds = array_merge($existingCaseIds, $newCaseIds);
         }
 
+        if ($caseCardChunks->isNotEmpty()) {
+            $newCardIds = array_diff(
+                $caseCardChunks->pluck('case_id')->unique()->toArray(),
+                $existingCaseIds
+            );
+
+            $matchedChunks = $matchedChunks->concat($caseCardChunks);
+            $existingCaseIds = array_merge($existingCaseIds, $newCardIds);
+        }
+
         if ($metaChunks->isNotEmpty()) {
             $newMetaIds = array_diff(
                 $metaChunks->pluck('case_id')->unique()->toArray(),
@@ -192,6 +269,7 @@ class LegalCaseRetrieverService
             if (!empty($newMetaIds)) {
                 $extra = $metaChunks->whereIn('case_id', $newMetaIds)->map(function ($c) {
                     $c->similarity = 0.60;
+                    $c->match_source = 'metadata';
                     return $c;
                 });
                 $matchedChunks = $matchedChunks->concat($extra);
@@ -210,9 +288,10 @@ class LegalCaseRetrieverService
         }
 
         // ── 7. Score + select top N cases (expanded for reranker) ─────────────
-        // Retrieve up to 3× the default limit so the reranker has room to work
-        $retrievalLimit = min(30, $caseLimit * 3);
-        $caseScores     = $this->computeCaseScores($matchedChunks);
+        // Retrieve a wider internal candidate set so semantic scoring can choose
+        // among legally analogous decisions. The final answer still receives top K.
+        $retrievalLimit = min(30, max($caseLimit * 6, 18));
+        $caseScores     = $this->computeCaseScores($matchedChunks, $rankingQuery);
 
         $topCaseIds = $caseScores
             ->sortByDesc('score')
@@ -299,21 +378,103 @@ class LegalCaseRetrieverService
 
     // ── Private: scoring ──────────────────────────────────────────────────────
 
-    private function computeCaseScores(Collection $chunks): Collection
+    private function computeCaseScores(Collection $chunks, string $originalQuery = ''): Collection
     {
         return $chunks
             ->groupBy('case_id')
-            ->map(function (Collection $group, int $caseId) {
+            ->map(function (Collection $group, int $caseId) use ($originalQuery) {
                 $similarities = $group->pluck('similarity')->map('floatval');
+                $caseSimilarities = $group
+                    ->filter(fn ($chunk) => ($chunk->match_source ?? null) === 'case_embedding')
+                    ->pluck('similarity')
+                    ->map('floatval');
+
+                $score = 0.7 * $similarities->max() + 0.3 * $similarities->avg();
+                $cardScore = $this->caseCardTextScore($originalQuery, $group->first());
+
+                if ($caseSimilarities->isNotEmpty()) {
+                    $score = max($score, min(1.0, $caseSimilarities->max() * self::CASE_EMBEDDING_SCORE_BOOST));
+                }
+
+                if ($cardScore > 0) {
+                    $score = max($score, min(1.0, self::CASE_CARD_SCORE_FLOOR + self::CASE_CARD_SCORE_BOOST * $cardScore));
+                }
+
                 return [
-                    'case_id'        => $caseId,
-                    'score'          => 0.7 * $similarities->max() + 0.3 * $similarities->avg(),
-                    'max_sim'        => $similarities->max(),
-                    'avg_sim'        => $similarities->avg(),
-                    'matched_chunks' => $group->count(),
+                    'case_id'         => $caseId,
+                    'score'           => $score,
+                    'max_sim'         => $similarities->max(),
+                    'avg_sim'         => $similarities->avg(),
+                    'case_sim'        => $caseSimilarities->isNotEmpty() ? $caseSimilarities->max() : null,
+                    'case_card_score' => $cardScore,
+                    'match_sources'   => $group->pluck('match_source')->filter()->unique()->values()->toArray(),
+                    'matched_chunks'  => $group->count(),
                 ];
             })
             ->values();
+    }
+
+    private function caseCardTextScore(string $query, ?object $row): float
+    {
+        $queryTokens = $this->meaningfulTokens($query);
+        if (empty($queryTokens) || $row === null || empty($row->case_card)) {
+            return 0.0;
+        }
+
+        $card = is_string($row->case_card)
+            ? json_decode($row->case_card, true)
+            : (array) $row->case_card;
+
+        if (!is_array($card)) {
+            return 0.0;
+        }
+
+        $legalIssue = $this->tokenCoverage($queryTokens, $this->meaningfulTokens((string) ($card['legal_issue'] ?? '')));
+        $holding    = $this->tokenCoverage($queryTokens, $this->meaningfulTokens((string) ($card['holding'] ?? '')));
+        $category   = $this->tokenCoverage($queryTokens, $this->meaningfulTokens((string) ($row->category ?? '')));
+
+        return max($legalIssue, $holding * 0.75, $category * 0.45);
+    }
+
+    private function tokenCoverage(array $queryTokens, array $candidateTokens): float
+    {
+        if (empty($queryTokens) || empty($candidateTokens)) {
+            return 0.0;
+        }
+
+        $candidateSet = array_fill_keys($candidateTokens, true);
+        $matched = 0;
+
+        foreach ($queryTokens as $token) {
+            if (isset($candidateSet[$token])) {
+                $matched++;
+            }
+        }
+
+        return $matched / count($queryTokens);
+    }
+
+    private function meaningfulTokens(string $text): array
+    {
+        $lower = mb_strtolower($text);
+        $parts = preg_split('/[^\p{L}\p{N}]+/u', $lower) ?: [];
+
+        $stop = [
+            'და', 'ან', 'თუ', 'რომ', 'არის', 'იყო', 'იქნა', 'საქმე', 'საკითხი',
+            'თაობაზე', 'შესახებ', 'სასამართლო', 'სასამართლოს', 'საქართველოს',
+        ];
+        $stopSet = array_fill_keys($stop, true);
+
+        $tokens = [];
+        foreach ($parts as $part) {
+            $token = trim($part);
+            if (mb_strlen($token) < 4 || isset($stopSet[$token])) {
+                continue;
+            }
+            $tokens[] = $token;
+        }
+
+        return array_values(array_unique($tokens));
     }
 
     // ── Private: reconstruction ───────────────────────────────────────────────
@@ -339,7 +500,7 @@ class LegalCaseRetrieverService
         $decisions      = [];
         $qualityFlags   = [];
 
-        foreach ($orderedCaseIds as $caseId) {
+        foreach ($orderedCaseIds as $rankIndex => $caseId) {
             $chunks = $chunksByCaseId->get($caseId, collect());
             if ($chunks->isEmpty()) {
                 continue;
@@ -388,11 +549,16 @@ class LegalCaseRetrieverService
                 'chamber'         => $first->chamber,
                 'court'           => $first->court,
                 'case_type'       => $first->case_type ?? 'administrative',
+                'case_card'       => is_string($first->case_card ?? null)
+                    ? json_decode($first->case_card, true)
+                    : ($first->case_card ?? null),
                 'full_text'       => $fullText,
                 'excerpt'         => $excerpt,
                 'chunk_count'     => $uniqueChunks->count(),
                 'quality_flags'   => $flags,
+                'match_sources'   => $score['match_sources'] ?? [],
                 'relevance_score' => $score ? round($score['score'], 4) : null,
+                'retrieval_rank'   => $rankIndex + 1,
             ];
         }
 

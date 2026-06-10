@@ -44,7 +44,7 @@ class MatsneRetrieverService
         $semanticResults = [];
 
         if (!empty($embedding)) {
-            $semanticResults = $this->vectorSearch($embedding, $limit, $domains, $year);
+            $semanticResults = $this->vectorSearch($query, $embedding, $limit, $domains, $year);
         } else {
             Log::debug('MatsneRetriever: embedding failed, keyword-only mode');
         }
@@ -56,7 +56,7 @@ class MatsneRetrieverService
         if (empty($results) && !empty($domains)) {
             Log::debug('MatsneRetriever: domain filter returned empty, retrying without filter', ['domains' => $domains]);
             $kwFallback  = $this->keywordSearch($query, $limit * 2, [], $year);
-            $vecFallback = !empty($embedding) ? $this->vectorSearch($embedding, $limit, [], $year) : [];
+            $vecFallback = !empty($embedding) ? $this->vectorSearch($query, $embedding, $limit, [], $year) : [];
             $results     = $this->mergeResults($kwFallback, $vecFallback, $limit);
         }
 
@@ -91,42 +91,64 @@ class MatsneRetrieverService
         }
 
         $conditions = [];
+        $scoreParts = [];
         $params     = [];
         foreach ($phrases as $i => $phrase) {
             $key = "kw{$i}";
             $pat = '%' . mb_strtolower($phrase) . '%';
-            $conditions[] = "(LOWER(mc.title) LIKE :{$key} OR LOWER(mc.content) LIKE :{$key}b)";
-            $params[$key]        = $pat;
-            $params[$key . 'b']  = $pat;
+            $conditions[] = "(LOWER(mc.title) LIKE :{$key}_title OR LOWER(mc.content) LIKE :{$key}_content)";
+            $scoreParts[] = "(CASE WHEN LOWER(mc.title) LIKE :{$key}_score_title THEN 2 ELSE 0 END
+                + CASE WHEN LOWER(mc.content) LIKE :{$key}_score_content THEN 1 ELSE 0 END)";
+            $params["{$key}_title"]         = $pat;
+            $params["{$key}_content"]       = $pat;
+            $params["{$key}_score_title"]   = $pat;
+            $params["{$key}_score_content"] = $pat;
         }
 
         $where       = implode(' OR ', $conditions);
+        $scoreSql    = implode(' + ', $scoreParts);
         $domainSql   = $this->domainSql($domains);
+        $titleQualitySql = $this->titleQualitySql($query);
         $params['lim']       = $limit;
         $params['year_from'] = $year;
         $params['year_to']   = $year;
 
         try {
             $rows = DB::connection('pgvector')->select("
-                SELECT DISTINCT ON (mc.matsne_id)
-                    mc.matsne_id,
-                    mc.title,
-                    mc.doc_type,
-                    mc.issuer,
-                    mc.is_active,
-                    mc.effective_from_year,
-                    mc.effective_to_year,
-                    mc.content,
-                    mc.chunk_index,
-                    COALESCE(md.hierarchy_level, 5) AS hierarchy_level
-                FROM matsne_chunks_v2 mc
-                LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
-                WHERE mc.is_active = true
-                  AND ({$where})
-                  AND (mc.effective_from_year IS NULL OR mc.effective_from_year <= :year_from)
-                  AND (mc.effective_to_year   IS NULL OR mc.effective_to_year   >= :year_to)
-                  {$domainSql}
-                ORDER BY mc.matsne_id, mc.chunk_index ASC
+                WITH candidates AS (
+                    SELECT
+                        mc.matsne_id,
+                        mc.title,
+                        mc.doc_type,
+                        mc.issuer,
+                        mc.is_active,
+                        mc.effective_from_year,
+                        mc.effective_to_year,
+                        mc.content,
+                        mc.chunk_index,
+                        COALESCE(md.hierarchy_level, 5) AS hierarchy_level,
+                        ({$scoreSql}) AS keyword_hits,
+                        {$titleQualitySql} AS title_quality
+                    FROM matsne_chunks_v2 mc
+                    LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
+                    WHERE mc.is_active = true
+                      AND ({$where})
+                      AND (mc.effective_from_year IS NULL OR mc.effective_from_year <= :year_from)
+                      AND (mc.effective_to_year   IS NULL OR mc.effective_to_year   >= :year_to)
+                      {$domainSql}
+                ),
+                ranked AS (
+                    SELECT *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY matsne_id
+                            ORDER BY keyword_hits * title_quality DESC, chunk_index ASC
+                        ) AS row_num
+                    FROM candidates
+                )
+                SELECT *
+                FROM ranked
+                WHERE row_num = 1
+                ORDER BY keyword_hits * title_quality DESC, hierarchy_level ASC
                 LIMIT :lim
             ", array_merge($params, $this->domainBindings($domains)));
         } catch (\Throwable $e) {
@@ -137,6 +159,8 @@ class MatsneRetrieverService
         $byDoc = [];
         foreach ($rows as $row) {
             $id = $row->matsne_id;
+            $keywordScore = (float) $row->keyword_hits * (float) $row->title_quality;
+            $rankScore = min(0.58, 0.30 + 0.06 * $keywordScore);
             $byDoc[$id] = [
                 'matsne_id'           => $id,
                 'title'               => $row->title ?? "Matsne #{$id}",
@@ -145,7 +169,8 @@ class MatsneRetrieverService
                 'is_active'           => $row->is_active,
                 'effective_from_year' => $row->effective_from_year,
                 'effective_to_year'   => $row->effective_to_year,
-                'similarity'          => 0.80,
+                'similarity'          => $rankScore,
+                '_rank_score'         => $rankScore,
                 'excerpt'             => mb_substr($row->content ?? '', 0, 1500),
                 'url'                 => "https://matsne.gov.ge/ka/document/view/{$id}/0",
                 'hierarchy_level'     => (int) ($row->hierarchy_level ?? 5),
@@ -156,11 +181,12 @@ class MatsneRetrieverService
         return array_values($byDoc);
     }
 
-    private function vectorSearch(array $embedding, int $limit, array $domains, int $year): array
+    private function vectorSearch(string $query, array $embedding, int $limit, array $domains, int $year): array
     {
         $vec         = '[' . implode(',', $embedding) . ']';
         $domainSql   = $this->domainSql($domains);
         $domainBinds = $this->domainBindings($domains);
+        $titleQualitySql = $this->titleQualitySql($query);
 
         foreach (self::THRESHOLDS as $threshold) {
             $rows = DB::connection('pgvector')->select("
@@ -175,6 +201,8 @@ class MatsneRetrieverService
                     mc.content,
                     mc.chunk_index,
                     1 - (mc.embedding <=> :emb::vector) AS similarity,
+                    {$titleQualitySql} AS title_quality,
+                    (1 - (mc.embedding <=> :emb_rank::vector)) * ({$titleQualitySql}) AS ranking_score,
                     COALESCE(md.hierarchy_level, 5) AS hierarchy_level
                 FROM matsne_chunks_v2 mc
                 LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
@@ -184,11 +212,12 @@ class MatsneRetrieverService
                   AND (mc.effective_from_year IS NULL OR mc.effective_from_year <= :year_from)
                   AND (mc.effective_to_year   IS NULL OR mc.effective_to_year   >= :year_to)
                   {$domainSql}
-                ORDER BY similarity DESC
+                ORDER BY ranking_score DESC
                 LIMIT :chunk_limit
             ", array_merge([
                 'emb'         => $vec,
                 'emb2'        => $vec,
+                'emb_rank'    => $vec,
                 'threshold'   => $threshold,
                 'year_from'   => $year,
                 'year_to'     => $year,
@@ -216,17 +245,22 @@ class MatsneRetrieverService
 
         foreach ($semantic as $doc) {
             $id = $doc['matsne_id'];
-            if (!isset($seen[$id])) {
+            $rankScore = $doc['_rank_score'] ?? $doc['similarity'];
+            $existingRankScore = $merged[$id]['_rank_score'] ?? $merged[$id]['similarity'] ?? 0;
+            if (!isset($seen[$id]) || $rankScore > $existingRankScore) {
                 $merged[$id] = $doc;
             }
         }
 
-        // Lex specialis: hierarchy_level ASC → similarity DESC
         usort($merged, function ($a, $b) {
+            $rankA = $a['_rank_score'] ?? $a['similarity'] ?? 0;
+            $rankB = $b['_rank_score'] ?? $b['similarity'] ?? 0;
+            $similarityOrder = $rankB <=> $rankA;
+            if ($similarityOrder !== 0) return $similarityOrder;
+
             $hlA = (int) ($a['hierarchy_level'] ?? 5);
             $hlB = (int) ($b['hierarchy_level'] ?? 5);
-            if ($hlA !== $hlB) return $hlA <=> $hlB;
-            return $b['similarity'] <=> $a['similarity'];
+            return $hlA <=> $hlB;
         });
 
         return array_slice(array_values($merged), 0, $limit);
@@ -248,6 +282,7 @@ class MatsneRetrieverService
                     'effective_from_year' => $row->effective_from_year,
                     'effective_to_year'   => $row->effective_to_year,
                     'similarity'          => (float) $row->similarity,
+                    '_rank_score'         => (float) $row->ranking_score,
                     'hierarchy_level'     => (int) ($row->hierarchy_level ?? 5),
                     'chunks'              => [],
                 ];
@@ -256,16 +291,18 @@ class MatsneRetrieverService
             if ((float) $row->similarity > $byDoc[$id]['similarity']) {
                 $byDoc[$id]['similarity'] = (float) $row->similarity;
             }
+            if ((float) $row->ranking_score > $byDoc[$id]['_rank_score']) {
+                $byDoc[$id]['_rank_score'] = (float) $row->ranking_score;
+            }
 
             $byDoc[$id]['chunks'][] = $row->content;
         }
 
-        // Lex specialis sort
         usort($byDoc, function ($a, $b) {
-            if ($a['hierarchy_level'] !== $b['hierarchy_level']) {
-                return $a['hierarchy_level'] <=> $b['hierarchy_level'];
-            }
-            return $b['similarity'] <=> $a['similarity'];
+            $similarityOrder = $b['_rank_score'] <=> $a['_rank_score'];
+            if ($similarityOrder !== 0) return $similarityOrder;
+
+            return $a['hierarchy_level'] <=> $b['hierarchy_level'];
         });
 
         return array_map(function (array $doc) {
@@ -280,19 +317,71 @@ class MatsneRetrieverService
 
     private function domainSql(array $domains): string
     {
+        $domains = $this->normalizeDomains($domains);
         if (empty($domains)) {
             return '';
         }
         $placeholders = implode(',', array_map(fn($i) => ":dom{$i}", array_keys($domains)));
-        return "AND (md.domain IN ({$placeholders}) OR md.domain IS NULL)";
+        return "AND md.domain IN ({$placeholders})";
     }
 
     private function domainBindings(array $domains): array
     {
+        $domains = $this->normalizeDomains($domains);
         $bindings = [];
         foreach (array_values($domains) as $i => $domain) {
             $bindings["dom{$i}"] = $domain;
         }
         return $bindings;
+    }
+
+    private function normalizeDomains(array $domains): array
+    {
+        $normalized = [];
+        $aliases = [
+            'civil_law' => 'civil',
+            'civil_procedure' => 'procedure',
+            'administrative' => 'admin',
+            'property' => 'civil',
+            'family' => 'civil',
+        ];
+
+        foreach ($domains as $domain) {
+            $normalized[] = $aliases[$domain] ?? $domain;
+        }
+
+        return array_values(array_unique($normalized));
+    }
+
+    private function titleQualitySql(string $query): string
+    {
+        if (str_contains(mb_strtolower($query), 'ცვლილებ')) {
+            return '1.0';
+        }
+
+        return "CASE
+            WHEN LOWER(mc.title) IN (
+                'საქართველოს სამოქალაქო კოდექსი',
+                'საქართველოს სამოქალაქო საპროცესო კოდექსი',
+                'საქართველოს სისხლის სამართლის კოდექსი',
+                'საქართველოს სისხლის სამართლის საპროცესო კოდექსი',
+                'საქართველოს ზოგადი ადმინისტრაციული კოდექსი',
+                'საქართველოს ადმინისტრაციული საპროცესო კოდექსი',
+                'საქართველოს შრომის კოდექსი',
+                'საქართველოს საგადასახადო კოდექსი',
+                'საქართველოს კონსტიტუცია',
+                'მეწარმეთა შესახებ',
+                'ადამიანის უფლებათა და ძირითად თავისუფლებათა დაცვის კონვენცია'
+            ) THEN 1.08
+            WHEN LOWER(mc.title) LIKE '%ცვლილების შეტან%'
+              OR LOWER(mc.title) LIKE '%ცვლილებების შეტან%'
+              OR LOWER(mc.title) LIKE '%დამატების შეტან%'
+              OR LOWER(mc.title) LIKE '%დამატებების შეტან%'
+              OR LOWER(mc.title) LIKE '%ცვლილებებისა და დამატებების%'
+              OR LOWER(mc.title) LIKE '%ძალადაკარგულად გამოცხად%'
+              OR LOWER(mc.title) LIKE '%კანონის პროექტ%'
+            THEN 0.35
+            ELSE 1.0
+        END";
     }
 }

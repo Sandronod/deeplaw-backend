@@ -22,6 +22,8 @@ return [
     // Retrieval limits
     'retrieval_chunk_limit'   => (int) env('RETRIEVAL_CHUNK_LIMIT', 20),
     'retrieval_case_limit'    => (int) env('RETRIEVAL_CASE_LIMIT', 3),
+    'answer_case_limit'       => (int) env('ANSWER_CASE_LIMIT', 5),
+    'primary_case_limit'      => (int) env('PRIMARY_CASE_LIMIT', 2),
     'retrieval_min_score'     => (float) env('RETRIEVAL_MIN_SCORE', 0.65),
     'context_history_messages' => (int) env('CONTEXT_HISTORY_MESSAGES', 6),
 ];

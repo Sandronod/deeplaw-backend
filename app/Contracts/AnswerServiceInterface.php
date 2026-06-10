@@ -24,7 +24,7 @@ interface AnswerServiceInterface
         array            $euResults        = [],
         array            $germanResults       = [],
         array            $constCourtResults  = [],
-        array            $sources            = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        array            $sources            = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'],
         ?IssueList       $issueList          = null,
         ?TriageResult    $triage             = null,
     ): string;
@@ -46,7 +46,7 @@ interface AnswerServiceInterface
         array            $euResults          = [],
         array            $germanResults      = [],
         array            $constCourtResults  = [],
-        array            $sources            = ['court', 'matsne', 'eu', 'german', 'const_court'],
+        array            $sources            = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'],
         ?IssueList       $issueList          = null,
         ?TriageResult    $triage             = null,
     ): \Generator;

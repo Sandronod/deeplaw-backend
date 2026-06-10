@@ -135,6 +135,7 @@ class EvalRetrievalCommand extends Command
     private function evaluateWithEmbeddings(array $goldSet, array $embeddings, bool $skipCaseVector, bool $showDetails = false): array
     {
         $hits1 = 0; $hits3 = 0; $hits5 = 0;
+        $issueHits1 = 0; $issueHits3 = 0; $issueHits5 = 0;
         $rrs   = [];
         $rows  = [];
 
@@ -163,9 +164,14 @@ class EvalRetrievalCommand extends Command
                 }
             }
 
+            $issueRank = $this->equivalentLegalIssueRank($item, $retrievedIds) ?: $rank;
+
             if ($rank === 1)              $hits1++;
             if ($rank > 0 && $rank <= 3) $hits3++;
             if ($rank > 0 && $rank <= 5) $hits5++;
+            if ($issueRank === 1)                    $issueHits1++;
+            if ($issueRank > 0 && $issueRank <= 3)  $issueHits3++;
+            if ($issueRank > 0 && $issueRank <= 5)  $issueHits5++;
             $rrs[] = ($rank > 0 && $rank <= 10) ? 1.0 / $rank : 0.0;
 
             if ($showDetails) {
@@ -173,6 +179,7 @@ class EvalRetrievalCommand extends Command
                     $item['id'],
                     mb_substr($item['query'], 0, 45) . (mb_strlen($item['query']) > 45 ? '…' : ''),
                     $rank > 0 ? "#{$rank}" : 'miss',
+                    $issueRank > 0 ? "#{$issueRank}" : 'miss',
                     $item['category'] ?? '',
                 ];
             }
@@ -186,17 +193,103 @@ class EvalRetrievalCommand extends Command
             'mrr' => $n > 0 ? array_sum($rrs) / $n : 0,
             'n'   => $n,
             'hits1' => $hits1, 'hits3' => $hits3, 'hits5' => $hits5,
+            'issue_p1' => $n > 0 ? $issueHits1 / $n : 0,
+            'issue_p3' => $n > 0 ? $issueHits3 / $n : 0,
+            'issue_p5' => $n > 0 ? $issueHits5 / $n : 0,
+            'issue_hits1' => $issueHits1, 'issue_hits3' => $issueHits3, 'issue_hits5' => $issueHits5,
         ];
 
         if ($showDetails && !empty($rows)) {
             $this->newLine();
-            $this->table(['#', 'Query', 'Rank', 'Category'], $rows);
+            $this->table(['#', 'Query', 'Case Rank', 'Issue Rank', 'Category'], $rows);
         }
 
         return $metrics;
     }
 
     // ── Output helpers ────────────────────────────────────────────────────────
+
+    private function equivalentLegalIssueRank(array $item, array $retrievedIds): int
+    {
+        if (empty($retrievedIds)) {
+            return 0;
+        }
+
+        $expectedIssue = $this->normalizeIssueText($item['query'] ?? '');
+        if ($expectedIssue === '') {
+            return 0;
+        }
+
+        $rows = \Illuminate\Support\Facades\DB::connection('pgvector')
+            ->table('court_cases')
+            ->whereIn('id', $retrievedIds)
+            ->get(['id', 'case_card']);
+
+        $issuesById = [];
+        foreach ($rows as $row) {
+            $card = is_string($row->case_card)
+                ? json_decode($row->case_card, true)
+                : (array) $row->case_card;
+            $card = is_array($card) ? $card : [];
+
+            $issuesById[(int) $row->id] = $this->normalizeIssueText((string) ($card['legal_issue'] ?? ''));
+        }
+
+        foreach (array_values($retrievedIds) as $pos => $caseId) {
+            $candidateIssue = $issuesById[(int) $caseId] ?? '';
+            if ($candidateIssue !== '' && $this->sameLegalIssue($expectedIssue, $candidateIssue)) {
+                return $pos + 1;
+            }
+        }
+
+        return 0;
+    }
+
+    private function sameLegalIssue(string $expected, string $candidate): bool
+    {
+        if ($expected === $candidate) {
+            return true;
+        }
+
+        $expectedTokens = $this->issueTokens($expected);
+        $candidateTokens = $this->issueTokens($candidate);
+
+        if (count($expectedTokens) < 4 || count($candidateTokens) < 4) {
+            return false;
+        }
+
+        $candidateSet = array_fill_keys($candidateTokens, true);
+        $matched = 0;
+        foreach ($expectedTokens as $token) {
+            if (isset($candidateSet[$token])) {
+                $matched++;
+            }
+        }
+
+        return ($matched / count($expectedTokens)) >= 0.92;
+    }
+
+    private function normalizeIssueText(string $text): string
+    {
+        $text = mb_strtolower(trim($text));
+        $text = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $text);
+
+        return trim(preg_replace('/\s+/u', ' ', $text));
+    }
+
+    private function issueTokens(string $text): array
+    {
+        $parts = preg_split('/\s+/u', $text) ?: [];
+        $tokens = [];
+
+        foreach ($parts as $part) {
+            if (mb_strlen($part) >= 4) {
+                $tokens[] = $part;
+            }
+        }
+
+        return array_values(array_unique($tokens));
+    }
 
     private function printMetrics(array $m): void
     {
@@ -206,6 +299,9 @@ class EvalRetrievalCommand extends Command
                 ['P@1', $this->fmt($m['p1']), "{$m['hits1']} / {$m['n']}"],
                 ['P@3', $this->fmt($m['p3']), "{$m['hits3']} / {$m['n']}"],
                 ['P@5', $this->fmt($m['p5']), "{$m['hits5']} / {$m['n']}"],
+                ['Issue@1', $this->fmt($m['issue_p1']), "{$m['issue_hits1']} / {$m['n']}"],
+                ['Issue@3', $this->fmt($m['issue_p3']), "{$m['issue_hits3']} / {$m['n']}"],
+                ['Issue@5', $this->fmt($m['issue_p5']), "{$m['issue_hits5']} / {$m['n']}"],
                 ['MRR', $this->fmt($m['mrr']), '—'],
             ]
         );

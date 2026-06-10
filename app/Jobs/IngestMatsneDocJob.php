@@ -24,6 +24,7 @@ class IngestMatsneDocJob implements ShouldQueue
     private const CHUNK_OVERLAP = 200;
     private const MAX_CHARS     = 8000; // Ollama BGE-M3 context limit
     private const CHUNKS_TABLE  = 'matsne_chunks_v2';
+    private const CHUNK_VERSION = 2;
 
     public function __construct(public readonly int $matsneId) {}
 
@@ -66,7 +67,11 @@ class IngestMatsneDocJob implements ShouldQueue
 
             // 3. Build full text from articles
             $fullText = collect($articles)
-                ->map(fn($a) => trim(($a['article_title'] ?? '') . "\n" . ($a['content'] ?? '')))
+                ->map(fn($a) => trim(implode("\n", array_filter([
+                    $a['article_num'] ?? '',
+                    $a['article_title'] ?? '',
+                    $a['content'] ?? '',
+                ]))))
                 ->filter()
                 ->implode("\n\n");
 
@@ -75,8 +80,8 @@ class IngestMatsneDocJob implements ShouldQueue
                 return;
             }
 
-            // 4. Chunk text
-            $chunks = $this->chunk($fullText);
+            // 4. Chunk articles without crossing article boundaries
+            $chunks = $this->chunkArticles($articles);
 
             // 5. Get title/doc_type from queue (fallback) or parser
             $queueRow = DB::connection('pgvector')
@@ -96,7 +101,7 @@ class IngestMatsneDocJob implements ShouldQueue
                 : null;
 
             // 6. Upsert matsne_documents
-            $hash = md5($fullText);
+            $hash = md5('chunks:v' . self::CHUNK_VERSION . '|' . $fullText);
 
             $existing = DB::connection('pgvector')
                 ->table('matsne_documents')
@@ -122,55 +127,71 @@ class IngestMatsneDocJob implements ShouldQueue
                 return;
             }
 
-            if ($existing) {
-                DB::connection('pgvector')
-                    ->table(self::CHUNKS_TABLE)
-                    ->where('document_id', $existing->id)
-                    ->delete();
-
-                DB::connection('pgvector')
-                    ->table('matsne_documents')
-                    ->where('id', $existing->id)
-                    ->update(array_merge($docData, ['updated_at' => now()]));
-
-                $documentId = $existing->id;
-            } else {
-                $documentId = DB::connection('pgvector')
-                    ->table('matsne_documents')
-                    ->insertGetId(array_merge($docData, [
-                        'matsne_id'  => $this->matsneId,
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ]));
-            }
-
-            // 7. Embed chunks and insert
+            $embeddings = [];
             foreach ($chunks as $index => $chunkText) {
-                $embedding = $embedder->embed(mb_substr($chunkText, 0, self::MAX_CHARS));
-
-                DB::connection('pgvector')->statement(
-                    'INSERT INTO ' . self::CHUNKS_TABLE . '
-                        (document_id, matsne_id, title, doc_type, issuer, is_active,
-                         effective_from_year, effective_to_year,
-                         chunk_index, content, embedding, created_at, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::vector, ?, ?)',
-                    [
-                        $documentId,
-                        $this->matsneId,
-                        $title,
-                        $docType,
-                        mb_substr((string) ($meta['issuer'] ?? ''), 0, 300) ?: null,
-                        $meta['is_active'] ?? true,
-                        $fromYear,
-                        $toYear,
-                        $index,
-                        $chunkText,
-                        '[' . implode(',', $embedding) . ']',
-                        now(),
-                        now(),
-                    ]
+                $embeddings[$index] = $embedder->embed(
+                    mb_substr($chunkText, 0, self::MAX_CHARS)
                 );
             }
+
+            DB::connection('pgvector')->transaction(function () use (
+                $existing,
+                $docData,
+                $chunks,
+                $embeddings,
+                $title,
+                $docType,
+                $meta,
+                $fromYear,
+                $toYear,
+            ) {
+                if ($existing) {
+                    DB::connection('pgvector')
+                        ->table('matsne_documents')
+                        ->where('id', $existing->id)
+                        ->update(array_merge($docData, ['updated_at' => now()]));
+
+                    $documentId = $existing->id;
+
+                    DB::connection('pgvector')
+                        ->table(self::CHUNKS_TABLE)
+                        ->where('document_id', $documentId)
+                        ->delete();
+                } else {
+                    $documentId = DB::connection('pgvector')
+                        ->table('matsne_documents')
+                        ->insertGetId(array_merge($docData, [
+                            'matsne_id'  => $this->matsneId,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]));
+                }
+
+                foreach ($chunks as $index => $chunkText) {
+                    DB::connection('pgvector')->statement(
+                        'INSERT INTO ' . self::CHUNKS_TABLE . '
+                            (document_id, matsne_id, title, doc_type, issuer, is_active,
+                             effective_from_year, effective_to_year,
+                             chunk_index, content, embedding, created_at, updated_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::vector, ?, ?)',
+                        [
+                            $documentId,
+                            $this->matsneId,
+                            $title,
+                            $docType,
+                            mb_substr((string) ($meta['issuer'] ?? ''), 0, 300) ?: null,
+                            $meta['is_active'] ?? true,
+                            $fromYear,
+                            $toYear,
+                            $index,
+                            $chunkText,
+                            '[' . implode(',', $embeddings[$index]) . ']',
+                            now(),
+                            now(),
+                        ]
+                    );
+                }
+            });
 
             $this->markDone();
 
@@ -190,18 +211,32 @@ class IngestMatsneDocJob implements ShouldQueue
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    private function chunk(string $text): array
+    private function chunkArticles(array $articles): array
     {
-        $chunks  = [];
-        $len     = mb_strlen($text);
-        $offset  = 0;
+        $chunks = [];
 
-        while ($offset < $len) {
-            $chunk = mb_substr($text, $offset, self::CHUNK_SIZE);
-            if (mb_strlen(trim($chunk)) > 20) {
-                $chunks[] = trim($chunk);
+        foreach ($articles as $article) {
+            $header = trim(implode("\n", array_filter([
+                $article['article_num'] ?? '',
+                $article['article_title'] ?? '',
+            ])));
+            $content = trim((string) ($article['content'] ?? ''));
+
+            if ($content === '') {
+                continue;
             }
-            $offset += self::CHUNK_SIZE - self::CHUNK_OVERLAP;
+
+            $bodyLimit = max(200, self::CHUNK_SIZE - mb_strlen($header) - 1);
+            $step = max(100, $bodyLimit - self::CHUNK_OVERLAP);
+
+            for ($offset = 0; $offset < mb_strlen($content); $offset += $step) {
+                $body = trim(mb_substr($content, $offset, $bodyLimit));
+                $chunk = trim($header . "\n" . $body);
+
+                if (mb_strlen($chunk) > 20) {
+                    $chunks[] = $chunk;
+                }
+            }
         }
 
         return $chunks;

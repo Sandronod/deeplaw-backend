@@ -14,30 +14,9 @@ use Illuminate\Support\Facades\Log;
  */
 class ArticleDetectorService
 {
-    // Abbreviation → matsne_id list (ordered by specificity)
-    private const LAW_MAP = [
-        'სსკ'       => [29962],   // სამოქ. საπроцесო კოდ. (CPC)
-        'სამ.კოდ'   => [31702],   // სამოქ. კოდ. (CC)
-        'სამოქ.კოდ' => [31702],
-        'სამ.კ'     => [31702],
-        'სკ'        => [31702],   // სამოქ. კოდ. — მოკლე ფორმა (CC) ← ყველაზე ხშირი!
-        'სსსკ'      => [90034],   // სისხლის სამართლის საπроцесო კოდ.
-        'სსს'       => [90034],
-        'ზაკ'       => [16270],   // ზოგ. ადმ. კოდ.
-        'ადმ.საπ'   => [16492],   // ადმ. საπроцесო კოდ.
-        'ადმ.კოდ'   => [16492],
-        'შრ.კოდ'    => [63789],   // შრომის კოდ.
-        'შრ.კ'      => [63789],
-    ];
-
-    // Domain → law IDs to try when no abbreviation is present
-    private const DOMAIN_LAWS = [
-        'civil_procedure' => [29962],
-        'civil_law'       => [31702],
-        'criminal'        => [90034],
-        'administrative'  => [16270, 16492],
-        'labor'           => [63789],
-    ];
+    public function __construct(
+        private readonly CanonicalLawResolverService $lawResolver,
+    ) {}
 
     /**
      * Detect article references and return matching chunks.
@@ -46,9 +25,12 @@ class ArticleDetectorService
      * @param  string[] $domains  TriageResult domains for fallback law inference
      * @return array<int, array{matsne_id, title, doc_type, issuer, is_active, excerpt, similarity, url, hierarchy_level}>
      */
-    public function detect(string $question, array $domains = []): array
+    public function detect(string $question, array $domains = [], ?int $relevantYear = null): array
     {
-        $refs = $this->extractRefs($question);
+        $refs = array_values(array_unique(array_merge(
+            $this->extractRefs($question),
+            $this->inferConceptRefs($question, $domains),
+        ), SORT_REGULAR));
 
         if (empty($refs)) {
             return [];
@@ -64,9 +46,12 @@ class ArticleDetectorService
 
         foreach ($refs as $ref) {
             $articleNum = $ref['num'];
-            $lawIds     = !empty($ref['law_ids']) ? $ref['law_ids'] : $this->inferLawIds($domains);
+            $documents  = $ref['code'] !== ''
+                ? $this->lawResolver->resolveAlias($ref['code'], $relevantYear)
+                : $this->lawResolver->resolveForDomains($domains, $relevantYear);
 
-            foreach ($lawIds as $matsneId) {
+            foreach ($documents as $document) {
+                $matsneId = $document['matsne_id'];
                 $key = "{$matsneId}:{$articleNum}";
                 if (isset($seen[$key])) {
                     continue;
@@ -97,80 +82,83 @@ class ArticleDetectorService
 
     /**
      * Extract article references from question text.
-     * Each entry: ['num' => int, 'code' => string, 'law_ids' => int[]|null]
+     * Each entry: ['num' => int, 'code' => string]
      */
     private function extractRefs(string $text): array
     {
-        $refs        = [];
-        $seenNums    = [];
+        $refs = [];
 
-        // ── Pass 1: references with explicit law abbreviation ─────────────────
-        // Matches: "სკ-ის 54-ე მუხლი", "სსკ-ის 21-ე მუხლი", "სამ.კოდ-ის 3-ე მუხლი"
-        // NOTE: სკ must come before სსკ so it is not swallowed by a longer match.
-        $pattern1 = '/(?P<code>სკ(?!ს)|სსკ|სამ\.?კოდ[ი]?|სამოქ\.?კოდ[ი]?|სამ\.?კ|სსსკ|სსს|ზაკ|ადმ\.?საπ(?:\.?კოდ[ი]?)?|ადმ\.?კოდ[ი]?|შრ\.?კოდ[ი]?|შრ\.?კ)(?:-ის|-ი)?\s+(?:მე-)?(?P<num>\d+)[-–]?(?:ე|ელ(?:ი|ა)?|ლ(?:ი|ა)?)?\s+მუხლ[ი|ს|ით|ად|ების|ებს]?/u';
+        $aliases = $this->lawResolver->aliases();
+        usort($aliases, fn (string $a, string $b) => mb_strlen($b) <=> mb_strlen($a));
+
+        $aliasPattern = implode('|', array_map(
+            fn (string $alias) => preg_quote($alias, '/'),
+            $aliases
+        ));
+
+        $articleSuffix = '(?:[-–]?(?:ე|ელი|ლი))?';
+        $articleWord   = 'მუხლ(?:ი|ის|ით|ად|ები|ების|ებს)?';
+        $pattern1      = '/(?P<code>' . $aliasPattern . ')(?:-?ის|-?ი)?\s+(?:მე-)?(?P<num>\d+)'
+            . $articleSuffix . '\s+' . $articleWord . '/u';
 
         if (preg_match_all($pattern1, $text, $matches, PREG_SET_ORDER)) {
             foreach ($matches as $m) {
-                $num    = (int) $m['num'];
-                $code   = $m['code'];
-                $lawIds = $this->resolveLawIds($code);
-                $refs[] = ['num' => $num, 'code' => $code, 'law_ids' => $lawIds];
-                $seenNums[$num] = true;
+                $refs[] = [
+                    'num'  => (int) $m['num'],
+                    'code' => trim($m['code']),
+                ];
             }
         }
 
-        // ── Pass 2: standalone references (no abbreviation) ───────────────────
-        // Matches: "21-ე მუხლი", "მე-9 მუხლი", "მე-9-ე მუხლი"
-        $pattern2 = '/(?:მე-)?(?P<num>\d+)[-–]?(?:ე|ელ(?:ი|ა)?|ლ(?:ი|ა)?)?\s+მუხლ[ი|ს|ით|ად|ების|ებს]?/u';
+        $pattern2 = '/(?:მე-)?(?P<num>\d+)' . $articleSuffix . '\s+' . $articleWord . '/u';
 
         if (preg_match_all($pattern2, $text, $matches, PREG_SET_ORDER)) {
             foreach ($matches as $m) {
                 $num = (int) $m['num'];
-                if (!isset($seenNums[$num])) {
-                    $refs[]          = ['num' => $num, 'code' => '', 'law_ids' => null];
-                    $seenNums[$num]  = true;
+                $hasExplicitReference = collect($refs)->contains(
+                    fn (array $ref) => $ref['num'] === $num && $ref['code'] !== ''
+                );
+
+                if (!$hasExplicitReference) {
+                    $refs[] = ['num' => $num, 'code' => ''];
                 }
             }
         }
 
-        return $refs;
+        return array_values(array_unique($refs, SORT_REGULAR));
     }
 
-    private function resolveLawIds(string $code): array
+    /**
+     * High-precision concept triggers for norms that must not rely only on
+     * vector similarity. Keep this list small and domain-gated.
+     */
+    private function inferConceptRefs(string $text, array $domains): array
     {
-        // Normalise: collapse dots and spaces
-        $norm = mb_strtolower(str_replace([' '], [''], $code));
+        $lower = mb_strtolower($text);
+        $hasLaborDomain = (bool) array_intersect($domains, ['labor']);
 
-        foreach (self::LAW_MAP as $abbrev => $ids) {
-            $abbrevNorm = mb_strtolower(str_replace([' '], [''], $abbrev));
-            if ($norm === $abbrevNorm || str_starts_with($norm, $abbrevNorm)) {
-                return $ids;
-            }
+        if (!$hasLaborDomain) {
+            return [];
         }
 
-        // Fallback: try prefix match on full code
-        foreach (self::LAW_MAP as $abbrev => $ids) {
-            $abbrevNorm = mb_strtolower(str_replace(['.', ' '], ['', ''], $abbrev));
-            $codeNorm   = mb_strtolower(str_replace(['.', ' '], ['', ''], $code));
-            if (str_starts_with($codeNorm, $abbrevNorm)) {
-                return $ids;
+        $terminationSignals = [
+            'გათავისუფლ',
+            'გაათავისუფლ',
+            'შეწყვეტ',
+            'დასაბუთ',
+            'მოშლ',
+        ];
+
+        foreach ($terminationSignals as $signal) {
+            if (str_contains($lower, $signal)) {
+                return [
+                    ['num' => 47, 'code' => 'შრომის კოდექს'],
+                    ['num' => 48, 'code' => 'შრომის კოდექს'],
+                ];
             }
         }
 
         return [];
-    }
-
-    private function inferLawIds(array $domains): array
-    {
-        $ids = [];
-        foreach ($domains as $domain) {
-            foreach (self::DOMAIN_LAWS[$domain] ?? [] as $id) {
-                if (!in_array($id, $ids, true)) {
-                    $ids[] = $id;
-                }
-            }
-        }
-        return $ids;
     }
 
     // ── DB lookup ─────────────────────────────────────────────────────────────
@@ -197,6 +185,10 @@ class ArticleDetectorService
         $where = implode(' OR ', $conditions);
 
         try {
+            $headingPattern = '(^|[\r\n])[[:space:]]*მუხლი[[:space:]]+'
+                . $articleNum
+                . '([.[:space:]]|$)';
+
             $rows = DB::connection('pgvector')->select("
                 SELECT
                     mc.matsne_id,
@@ -212,10 +204,35 @@ class ArticleDetectorService
                 FROM matsne_chunks_v2 mc
                 LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
                 WHERE mc.matsne_id = :matsne_id
-                  AND ({$where})
+                  AND mc.content ~ :heading
                 ORDER BY mc.chunk_index ASC
-                LIMIT 3
-            ", $bindings);
+                LIMIT 4
+            ", [
+                'matsne_id' => $matsneId,
+                'heading' => $headingPattern,
+            ]);
+
+            if (empty($rows)) {
+                $rows = DB::connection('pgvector')->select("
+                    SELECT
+                        mc.matsne_id,
+                        mc.title,
+                        mc.doc_type,
+                        mc.issuer,
+                        mc.is_active,
+                        mc.effective_from_year,
+                        mc.effective_to_year,
+                        mc.content,
+                        mc.chunk_index,
+                        COALESCE(md.hierarchy_level, 5) AS hierarchy_level
+                    FROM matsne_chunks_v2 mc
+                    LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
+                    WHERE mc.matsne_id = :matsne_id
+                      AND ({$where})
+                    ORDER BY mc.chunk_index ASC
+                    LIMIT 3
+                ", $bindings);
+            }
         } catch (\Throwable $e) {
             Log::warning('ArticleDetector: DB query failed', [
                 'matsne_id' => $matsneId,
@@ -241,7 +258,7 @@ class ArticleDetectorService
             'effective_from_year' => $firstRow->effective_from_year,
             'effective_to_year'   => $firstRow->effective_to_year,
             'similarity'          => 0.95,  // high — direct article match
-            'excerpt'             => mb_substr($excerpt, 0, 2000),
+            'excerpt'             => mb_substr($excerpt, 0, 6000),
             'url'                 => "https://matsne.gov.ge/ka/document/view/{$matsneId}/0",
             'hierarchy_level'     => (int) ($firstRow->hierarchy_level ?? 5),
             '_source'             => 'article_detector',

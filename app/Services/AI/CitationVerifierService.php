@@ -99,6 +99,12 @@ class CitationVerifierService
             ->filter()
             ->values()
             ->toArray();
+        $primaryCaseNums = collect($decisions)
+            ->filter(fn (array $decision) => ($decision['answer_role'] ?? null) === 'primary')
+            ->pluck('case_num')
+            ->filter()
+            ->values()
+            ->toArray();
 
         if (empty($caseNums) && empty($matsneResults)) {
             return '';
@@ -111,6 +117,13 @@ class CitationVerifierService
             $lines[] = "✅ სასამართლო გადაწყვეტილებები:";
             foreach ($caseNums as $num) {
                 $lines[] = "   • {$num}";
+            }
+        }
+
+        if (!empty($primaryCaseNums)) {
+            $lines[] = "\n⚠️ MANDATORY PRIMARY CASES:";
+            foreach ($primaryCaseNums as $num) {
+                $lines[] = "   • {$num} — ეს case_num ზუსტად უნდა ახსენო პასუხში.";
             }
         }
 

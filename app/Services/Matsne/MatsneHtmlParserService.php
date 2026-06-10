@@ -114,12 +114,8 @@ class MatsneHtmlParserService
             }
         }
 
-        // Detect "გაუქმებული" anywhere on page if not found in table
-        if ($meta['is_active']) {
-            $bodyText = mb_strtolower($xpath->evaluate('string(//body)'));
-            if (str_contains($bodyText, 'გაუქმებულია') || str_contains($bodyText, 'ძალადაკარგულ')) {
-                $meta['is_active'] = false;
-            }
+        if ($meta['effective_to'] !== null) {
+            $meta['is_active'] = $meta['effective_to'] > date('Y-m-d');
         }
 
         return $meta;
@@ -288,7 +284,16 @@ class MatsneHtmlParserService
             if (!empty($articles)) return $articles;
         }
 
-        // Strategy 0c: content directly in #maindoc (new-style doc without structured sub-parts).
+        // Strategy 0c: current Matsne layout uses named oldStyleDocumentPart anchors.
+        $oldStyleHeaders = $xpath->query(
+            '//a[contains(concat(" ", normalize-space(@class), " "), " oldStyleDocumentPart ") and starts-with(@name, "part_")]'
+        );
+        if ($oldStyleHeaders->length > 0) {
+            $articles = $this->extractFromOldStyleParts($xpath, $oldStyleHeaders);
+            if (!empty($articles)) return $articles;
+        }
+
+        // Strategy 0d: content directly in #maindoc (new-style doc without structured sub-parts).
         // Extract text nodes only — skip <script> and <style> children to avoid Handlebars
         // sidebar templates ({{...}}) polluting the content check.
         $maindoc = $xpath->query('//div[@id="maindoc"]')->item(0);
@@ -343,6 +348,63 @@ class MatsneHtmlParserService
             $text = $this->cleanText($section1->textContent);
             if (mb_strlen($text) > 50) {
                 return $this->chunkTextIntoArticles($text);
+            }
+        }
+
+        return $articles;
+    }
+
+    private function extractFromOldStyleParts(\DOMXPath $xpath, \DOMNodeList $headers): array
+    {
+        $articles = [];
+
+        foreach ($headers as $header) {
+            $headerText = $this->cleanText($header->textContent);
+            if (!preg_match('/^მუხლი\s+[\d\w¹²³⁴⁵⁶⁷⁸⁹]+/u', $headerText)) {
+                continue;
+            }
+
+            $articleNum = $headerText;
+            $articleTitle = '';
+            if (preg_match('/^(მუხლი\s+[\d\w¹²³⁴⁵⁶⁷⁸⁹]+)[.\s]+(.*)$/su', $headerText, $matches)) {
+                $articleNum = trim($matches[1]);
+                $articleTitle = trim($matches[2]);
+            }
+
+            $contentParts = [];
+            $container = $header->parentNode;
+
+            while ($container !== null && $container->nodeName !== 'p') {
+                $container = $container->parentNode;
+            }
+
+            $sibling = $container?->nextSibling;
+            while ($sibling !== null) {
+                if ($sibling->nodeType === XML_ELEMENT_NODE) {
+                    $nextHeader = $xpath->query(
+                        './/a[contains(concat(" ", normalize-space(@class), " "), " oldStyleDocumentPart ")]',
+                        $sibling
+                    );
+                    if ($nextHeader->length > 0) {
+                        break;
+                    }
+
+                    $text = $this->cleanText($sibling->textContent);
+                    if (mb_strlen($text) > 1) {
+                        $contentParts[] = $text;
+                    }
+                }
+
+                $sibling = $sibling->nextSibling;
+            }
+
+            $content = trim(implode(' ', $contentParts));
+            if ($articleNum !== '' && mb_strlen($content) > 5) {
+                $articles[] = [
+                    'article_num' => $articleNum,
+                    'article_title' => $articleTitle,
+                    'content' => $content,
+                ];
             }
         }
 

@@ -21,7 +21,7 @@ class MatsneFetchService
      */
     public function fetchHtml(int $matsneId): string
     {
-        $url = self::BASE_URL . "/{$matsneId}/0?publication=0";
+        $url = self::BASE_URL . "/{$matsneId}/0";
 
         Log::info('MatsneFetchService: fetching', ['url' => $url]);
 

@@ -17,19 +17,9 @@ class SemanticArticleRetrieverService
     private const THRESHOLD   = 0.35;
     private const CHUNK_LIMIT = 5;
 
-    private const DOMAIN_LAWS = [
-        // TriageResult domain values → substantive law IDs only (no procedural mixing)
-        'civil'           => [31702],   // CC only — CPC is procedural, irrelevant for substantive questions
-        'civil_law'       => [31702],
-        'civil_procedure' => [29962],
-        'procedure'       => [29962],
-        'criminal'        => [90034],
-        'administrative'  => [16270],
-        'labor'           => [63789],
-        'family'          => [31702],
-        'property'        => [31702],
-        'corporate'       => [31702],
-    ];
+    public function __construct(
+        private readonly CanonicalLawResolverService $lawResolver,
+    ) {}
 
     /**
      * @param  array $embedding  bge-m3 embedding (1024 dims) — from runPipeline()
@@ -44,13 +34,18 @@ class SemanticArticleRetrieverService
 
         $year    = $relevantYear ?? (int) date('Y');
         $vec     = '[' . implode(',', $embedding) . ']';
-        $lawIds  = $this->domainsToLawIds($domains);
+        $lawIds  = array_column(
+            $this->lawResolver->resolveForDomains($domains, $year),
+            'matsne_id'
+        );
         $idSql   = '';
+        $activeSql = 'AND mc.is_active = true';
         $idBinds = [];
 
         if (!empty($lawIds)) {
             $placeholders = implode(',', array_map(fn($i) => ":lid{$i}", array_keys($lawIds)));
             $idSql = "AND mc.matsne_id IN ({$placeholders})";
+            $activeSql = '';
             foreach (array_values($lawIds) as $i => $id) {
                 $idBinds["lid{$i}"] = $id;
             }
@@ -73,7 +68,7 @@ class SemanticArticleRetrieverService
                 FROM matsne_chunks_v2 mc
                 LEFT JOIN matsne_documents md ON md.matsne_id = mc.matsne_id
                 WHERE mc.embedding IS NOT NULL
-                  AND mc.is_active = true
+                  {$activeSql}
                   AND 1 - (mc.embedding <=> :emb2::vector) >= :threshold
                   AND (mc.effective_from_year IS NULL OR mc.effective_from_year <= :year_from)
                   AND (mc.effective_to_year   IS NULL OR mc.effective_to_year   >= :year_to)
@@ -151,16 +146,4 @@ class SemanticArticleRetrieverService
         return null;
     }
 
-    private function domainsToLawIds(array $domains): array
-    {
-        $ids = [];
-        foreach ($domains as $domain) {
-            foreach (self::DOMAIN_LAWS[$domain] ?? [] as $id) {
-                if (!in_array($id, $ids, true)) {
-                    $ids[] = $id;
-                }
-            }
-        }
-        return $ids;
-    }
 }

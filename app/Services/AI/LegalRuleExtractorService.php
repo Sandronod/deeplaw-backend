@@ -46,7 +46,11 @@ class LegalRuleExtractorService
         // Only process article-specific results (not semantic search results)
         $articleDocs = array_filter(
             $matsneResults,
-            fn($r) => in_array($r['_source'] ?? '', ['article_detector', 'concept_detector'], true)
+            fn($r) => in_array(
+                $r['_source'] ?? '',
+                ['article_detector', 'semantic_article', 'concept_detector'],
+                true
+            )
         );
 
         if (empty($articleDocs)) {

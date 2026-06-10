@@ -26,6 +26,13 @@ class QueryExtractorService
         'labor', 'property', 'procedure', 'tax', 'family', 'echr',
     ];
 
+    private const DOMAIN_DRIFT_SIGNALS = [
+        'criminal' => ['სისხლის', 'დანაშაულ', 'სასჯელ', 'ბრალ', 'პატიმრ', 'მსჯავრდ', 'განაჩენ'],
+        'family' => ['განქორწინ', 'მეუღლ', 'შვილ', 'ალიმენტ', 'მეურვ'],
+        'labor' => ['შრომ', 'დასაქმ', 'გათავისუფლ', 'ხელფას', 'სამუშაო'],
+        'tax' => ['საგადასახად', 'გადასახად', 'დღგ', 'საბაჟო'],
+    ];
+
     /**
      * Extracts search terms AND legal domain from the user message in one LLM call.
      *
@@ -105,6 +112,16 @@ PROMPT,
                 $domain = null;
             }
 
+            if ($this->isClearlyUnrelatedExtraction($userMessage, $query, $domain)) {
+                Log::warning('QueryExtractor: discarded unrelated extraction', [
+                    'original' => $userMessage,
+                    'query' => $query,
+                    'domain' => $domain,
+                ]);
+
+                return ['query' => $userMessage, 'domain' => null];
+            }
+
             // Expand with glossary synonyms
             $synonyms = $this->glossary->expandQuery($userMessage);
             if (!empty($synonyms)) {
@@ -125,5 +142,66 @@ PROMPT,
         }
 
         return ['query' => $userMessage, 'domain' => null];
+    }
+
+    private function isClearlyUnrelatedExtraction(string $original, string $query, ?string $domain): bool
+    {
+        $originalLower = mb_strtolower($original);
+        $queryLower = mb_strtolower($query);
+        $overlap = $this->meaningfulTokenOverlap($originalLower, $queryLower);
+
+        foreach (self::DOMAIN_DRIFT_SIGNALS as $signalDomain => $signals) {
+            $queryHasDomain = $this->containsAny($queryLower, $signals);
+
+            if (!$queryHasDomain || $this->containsAny($originalLower, $signals)) {
+                continue;
+            }
+
+            if ($domain === $signalDomain || $overlap === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Counts exact overlap of meaningful tokens. This is intentionally used only
+     * as a guardrail around domain-drift signals, not as a general synonym judge.
+     */
+    private function meaningfulTokenOverlap(string $left, string $right): int
+    {
+        $leftTokens = $this->meaningfulTokens($left);
+        $rightTokens = $this->meaningfulTokens($right);
+
+        return count(array_intersect($leftTokens, $rightTokens));
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function meaningfulTokens(string $text): array
+    {
+        $tokens = preg_split('/[^\p{L}\p{N}]+/u', $text) ?: [];
+        $stopWords = ['და', 'ან', 'რომ', 'არის', 'იყო', 'თუ', 'რა', 'რას', 'როგორ', 'საკითხი'];
+
+        return array_values(array_unique(array_filter(
+            $tokens,
+            fn (string $token) => mb_strlen($token) >= 4 && !in_array($token, $stopWords, true),
+        )));
+    }
+
+    /**
+     * @param array<int, string> $signals
+     */
+    private function containsAny(string $text, array $signals): bool
+    {
+        foreach ($signals as $signal) {
+            if (str_contains($text, $signal)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
