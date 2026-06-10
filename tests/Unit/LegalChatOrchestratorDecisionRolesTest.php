@@ -53,6 +53,36 @@ class LegalChatOrchestratorDecisionRolesTest extends TestCase
         $this->assertStringContainsString('main authority', $result[2]['usage_instruction']);
     }
 
+    public function test_it_does_not_mark_low_semantic_matches_as_primary(): void
+    {
+        config(['openai.primary_case_limit' => 2]);
+
+        $service = (new ReflectionClass(LegalChatOrchestratorService::class))->newInstanceWithoutConstructor();
+        $method = new ReflectionMethod($service, 'annotateDecisionRoles');
+
+        $result = $method->invoke($service, [
+            [
+                'case_id' => 101,
+                'semantic_relevance_score' => 31.0,
+                'semantic_relevance' => ['confidence' => 'low'],
+            ],
+            [
+                'case_id' => 202,
+                'semantic_relevance_score' => 44.0,
+                'semantic_relevance' => ['confidence' => 'medium'],
+            ],
+            [
+                'case_id' => 303,
+                'semantic_relevance_score' => 51.0,
+                'semantic_relevance' => ['confidence' => 'medium'],
+            ],
+        ]);
+
+        $this->assertSame(['supporting', 'supporting', 'supporting'], array_column($result, 'answer_role'));
+        $this->assertContains('weak_context_match', $result[0]['quality_flags']);
+        $this->assertStringContainsString('Do NOT cite as direct authority', $result[0]['usage_instruction']);
+    }
+
     public function test_it_discards_extracted_search_text_without_query_overlap(): void
     {
         $service = (new ReflectionClass(LegalChatOrchestratorService::class))->newInstanceWithoutConstructor();

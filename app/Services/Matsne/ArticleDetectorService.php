@@ -27,10 +27,10 @@ class ArticleDetectorService
      */
     public function detect(string $question, array $domains = [], ?int $relevantYear = null): array
     {
-        $refs = array_values(array_unique(array_merge(
+        $refs = $this->mergeRefsWithSources(
             $this->extractRefs($question),
             $this->inferConceptRefs($question, $domains),
-        ), SORT_REGULAR));
+        );
 
         if (empty($refs)) {
             return [];
@@ -46,6 +46,7 @@ class ArticleDetectorService
 
         foreach ($refs as $ref) {
             $articleNum = $ref['num'];
+            $source     = $ref['_source'] ?? 'article_detector';
             $documents  = $ref['code'] !== ''
                 ? $this->lawResolver->resolveAlias($ref['code'], $relevantYear)
                 : $this->lawResolver->resolveForDomains($domains, $relevantYear);
@@ -58,12 +59,13 @@ class ArticleDetectorService
                 }
                 $seen[$key] = true;
 
-                $chunk = $this->fetchArticle($matsneId, $articleNum);
+                $chunk = $this->fetchArticle($matsneId, $articleNum, $source);
                 if ($chunk !== null) {
                     $results[] = $chunk;
                     Log::info('ArticleDetector: hit', [
                         'matsne_id' => $matsneId,
                         'article'   => $articleNum,
+                        'source'    => $source,
                         'title'     => $chunk['title'],
                     ]);
                 } else {
@@ -76,6 +78,28 @@ class ArticleDetectorService
         }
 
         return $results;
+    }
+
+    /**
+     * @param array<int, array{num: int, code: string}> $explicitRefs
+     * @param array<int, array{num: int, code: string}> $conceptRefs
+     * @return array<int, array{num: int, code: string, _source: string}>
+     */
+    private function mergeRefsWithSources(array $explicitRefs, array $conceptRefs): array
+    {
+        $merged = [];
+
+        foreach ($explicitRefs as $ref) {
+            $key = "{$ref['code']}:{$ref['num']}";
+            $merged[$key] = $ref + ['_source' => 'article_detector'];
+        }
+
+        foreach ($conceptRefs as $ref) {
+            $key = "{$ref['code']}:{$ref['num']}";
+            $merged[$key] ??= $ref + ['_source' => 'concept_detector'];
+        }
+
+        return array_values($merged);
     }
 
     // ── Regex extraction ──────────────────────────────────────────────────────
@@ -136,34 +160,99 @@ class ArticleDetectorService
     {
         $lower = mb_strtolower($text);
         $hasLaborDomain = (bool) array_intersect($domains, ['labor']);
+        $hasCivilDomain = (bool) array_intersect($domains, ['civil', 'civil_law', 'property', 'corporate']);
 
-        if (!$hasLaborDomain) {
-            return [];
-        }
+        $refs = [];
 
-        $terminationSignals = [
-            'გათავისუფლ',
-            'გაათავისუფლ',
-            'შეწყვეტ',
-            'დასაბუთ',
-            'მოშლ',
-        ];
+        if ($hasLaborDomain) {
+            $terminationSignals = [
+                'გათავისუფლ',
+                'გაათავისუფლ',
+                'შეწყვეტ',
+                'დასაბუთ',
+                'მოშლ',
+            ];
 
-        foreach ($terminationSignals as $signal) {
-            if (str_contains($lower, $signal)) {
-                return [
+            foreach ($terminationSignals as $signal) {
+                if (!str_contains($lower, $signal)) {
+                    continue;
+                }
+
+                $refs = array_merge($refs, [
                     ['num' => 47, 'code' => 'შრომის კოდექს'],
                     ['num' => 48, 'code' => 'შრომის კოდექს'],
-                ];
+                ]);
+                break;
             }
         }
 
-        return [];
+        if ($hasCivilDomain) {
+            if ($this->containsAny($lower, ['ამორალურ', 'ზნეობ', 'საჯარო წესრიგ'])) {
+                $refs[] = ['num' => 54, 'code' => 'სკ'];
+            }
+
+            $hasPriceSignal = $this->containsAny($lower, ['ფას', 'ღირებულ', 'ანაზღაურ', 'შესრულებას']);
+            $hasImbalanceSignal = $this->containsAny($lower, [
+                'დისპროპორც',
+                'შეუსაბამ',
+                'საბაზრო ღირებულ',
+                'გადაჭარბ',
+                '3-ჯერ',
+                'სამჯერ',
+                'მძიმე მდგომარეობ',
+                'გულუბრყვილ',
+                'საბაზრო ძალაუფლებ',
+                'ბოროტად გამოყენ',
+            ]);
+
+            if ($hasPriceSignal && ($hasImbalanceSignal || $this->containsAny($lower, ['ამორალურ', 'ზნეობ']))) {
+                $refs[] = ['num' => 55, 'code' => 'სკ'];
+            }
+
+            if ($this->containsAny($lower, ['მოტყუ', 'მოატყუ', 'ატყუ', 'შეცდომაში', 'არარსებულ', 'დუმდა', 'დამალა', 'დაფარა'])) {
+                $refs[] = ['num' => 81, 'code' => 'სკ'];
+                $refs[] = ['num' => 84, 'code' => 'სკ'];
+            }
+
+            if ($this->containsAny($lower, ['ნაკლი', 'დაფარულ', 'დაზიანებ', 'საძირკვლ', 'უნაკლო'])
+                && $this->containsAny($lower, ['ნასყიდობ', 'გამყიდველ', 'მყიდველ', 'ნივთ', 'ქონებ', 'უძრავ'])
+            ) {
+                $refs = array_merge($refs, [
+                    ['num' => 490, 'code' => 'სკ'],
+                    ['num' => 491, 'code' => 'სკ'],
+                    ['num' => 492, 'code' => 'სკ'],
+                    ['num' => 494, 'code' => 'სკ'],
+                    ['num' => 495, 'code' => 'სკ'],
+                    ['num' => 497, 'code' => 'სკ'],
+                ]);
+            }
+
+            if ($this->containsAny($lower, ['ხანდაზმულ', 'ვადა', 'ვადები', '6 თვე', 'ექვსი თვე'])) {
+                $refs[] = ['num' => 129, 'code' => 'სკ'];
+                $refs[] = ['num' => 130, 'code' => 'სკ'];
+            }
+        }
+
+        return array_values(array_unique($refs, SORT_REGULAR));
+    }
+
+    /**
+     * @param array<int, string> $needles
+     */
+    private function containsAny(string $text, array $needles): bool
+    {
+        foreach ($needles as $needle) {
+            if (str_contains($text, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // ── DB lookup ─────────────────────────────────────────────────────────────
 
-    public function fetchArticle(int $matsneId, int $articleNum): ?array
+    public function fetchArticle(int $matsneId, int $articleNum, string $source = 'article_detector'): ?array
     {
         // Build OR conditions for the various ways an article number can appear in text
         $pats = [
@@ -248,6 +337,7 @@ class ArticleDetectorService
 
         $firstRow = $rows[0];
         $excerpt  = implode("\n\n", array_map(fn($r) => $r->content, $rows));
+        $excerptLimit = $source === 'concept_detector' ? 2500 : 6000;
 
         return [
             'matsne_id'           => $matsneId,
@@ -258,10 +348,10 @@ class ArticleDetectorService
             'effective_from_year' => $firstRow->effective_from_year,
             'effective_to_year'   => $firstRow->effective_to_year,
             'similarity'          => 0.95,  // high — direct article match
-            'excerpt'             => mb_substr($excerpt, 0, 6000),
+            'excerpt'             => mb_substr($excerpt, 0, $excerptLimit),
             'url'                 => "https://matsne.gov.ge/ka/document/view/{$matsneId}/0",
             'hierarchy_level'     => (int) ($firstRow->hierarchy_level ?? 5),
-            '_source'             => 'article_detector',
+            '_source'             => $source,
             '_article_num'        => $articleNum,
         ];
     }

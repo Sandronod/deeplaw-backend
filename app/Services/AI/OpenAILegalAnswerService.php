@@ -29,6 +29,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         private readonly LegalGlossaryService       $glossary,
         private readonly CitationVerifierService    $citationVerifier,
         private readonly LegalRuleExtractorService  $ruleExtractor,
+        private readonly LegalRemedyGuardService    $remedyGuard,
     ) {
         $this->apiKey      = config('openai.api_key');
         $this->model       = config('openai.chat_model', 'gpt-4.1');
@@ -71,7 +72,12 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
     ): string {
         $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion, $triage);
         $rulesBlock   = $this->ruleExtractor->buildPromptBlock($extractedRules);
-        $contextBlock = $rulesBlock . ($rulesBlock ? "\n\n" : '') . $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults);
+        $remedyBlock  = $this->remedyGuard->buildPromptBlock($userQuestion, $matsneResults, $decisions, $triage);
+        $contextBlock = implode("\n\n", array_filter([
+            $rulesBlock,
+            $remedyBlock,
+            $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults),
+        ]));
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
         try {
@@ -857,7 +863,23 @@ BLOCK;
             ? " (სულ ბაზაში: {$totalFound} — ნაჩვენებია: {$count})"
             : "";
 
+        $primaryCount = count(array_filter(
+            $decisions,
+            fn (array $d) => ($d['answer_role'] ?? null) === 'primary',
+        ));
+
         $blocks = ["STATUS: FOUND — {$count} გადაწყვეტილება{$totalNote}\n"];
+        if ($primaryCount === 0) {
+            $blocks[] = <<<GUARD
+COURT AUTHORITY GUARD:
+No retrieved Georgian court decision is marked PRIMARY AUTHORITY for this question.
+Do NOT write that "court practice confirms/recognizes" the rule.
+Do NOT create a "court practice confirms" style section from SUPPORTING ANALOGY cases.
+If you mention any retrieved decision, label it only as weak/supporting analogy.
+Use this wording if needed: "პირდაპირი შესაბამისი სასამართლო პრაქტიკა მოძიებულ წყაროებში ვერ მოიძებნა; ქვემოთ მოყვანილი საქმეები მხოლოდ დამხმარე ანალოგიაა."
+For the main answer, rely on retrieved legislation and explicitly say direct court practice was not found in the retrieved sources.
+GUARD;
+        }
 
         foreach ($decisions as $i => $d) {
             $num  = $i + 1;
@@ -1162,7 +1184,12 @@ BLOCK;
 
         $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion, $triage);
         $rulesBlock   = $this->ruleExtractor->buildPromptBlock($extractedRules);
-        $contextBlock = $rulesBlock . ($rulesBlock ? "\n\n" : '') . $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults);
+        $remedyBlock  = $this->remedyGuard->buildPromptBlock($userQuestion, $matsneResults, $decisions, $triage);
+        $contextBlock = implode("\n\n", array_filter([
+            $rulesBlock,
+            $remedyBlock,
+            $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults),
+        ]));
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
         $client = new GuzzleClient();

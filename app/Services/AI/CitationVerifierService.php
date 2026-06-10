@@ -105,6 +105,12 @@ class CitationVerifierService
             ->filter()
             ->values()
             ->toArray();
+        $supportingCaseNums = collect($decisions)
+            ->filter(fn (array $decision) => ($decision['answer_role'] ?? null) !== 'primary')
+            ->pluck('case_num')
+            ->filter()
+            ->values()
+            ->toArray();
 
         if (empty($caseNums) && empty($matsneResults)) {
             return '';
@@ -113,10 +119,19 @@ class CitationVerifierService
         $lines = ["────────────────────────\n🔒 PERMITTED CITATIONS (STRICT)\n────────────────────────"];
         $lines[] = "შეგიძლია მხოლოდ შემდეგი წყაროები დაიციტირო. სხვა არაფერი.\n";
 
-        if (!empty($caseNums)) {
-            $lines[] = "✅ სასამართლო გადაწყვეტილებები:";
-            foreach ($caseNums as $num) {
+        if (!empty($primaryCaseNums)) {
+            $lines[] = "✅ სასამართლო გადაწყვეტილებები — PRIMARY AUTHORITY:";
+            foreach ($primaryCaseNums as $num) {
                 $lines[] = "   • {$num}";
+            }
+        } elseif (!empty($caseNums)) {
+            $lines[] = "⚠️ სასამართლო გადაწყვეტილებები — direct primary authority არ მოიძებნა:";
+        }
+
+        if (!empty($supportingCaseNums)) {
+            $lines[] = "\n⚠️ SUPPORTING / WEAK ANALOGY ONLY:";
+            foreach ($supportingCaseNums as $num) {
+                $lines[] = "   • {$num} — არ გამოიყენო როგორც პირდაპირი/მთავარი პრაქტიკა; მხოლოდ შეზღუდული ანალოგია.";
             }
         }
 

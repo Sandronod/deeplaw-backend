@@ -7,6 +7,7 @@ use App\DTOs\ParsedQuery;
 use App\DTOs\RetrievalResult;
 use App\DTOs\TriageResult;
 use App\Services\AI\AnswerValidatorService;
+use App\Services\AI\AnswerPostProcessorService;
 use App\Services\AI\CitationVerifierService;
 use App\Services\AI\EvalJudgeService;
 use App\Services\AI\LegalRuleExtractorService;
@@ -65,6 +66,7 @@ class LegalChatOrchestratorService
         private readonly LegalTriageService         $triage,
         private readonly CitationVerifierService    $citationVerifier,
         private readonly AnswerValidatorService     $answerValidator,
+        private readonly AnswerPostProcessorService $answerPostProcessor,
         private readonly EvalJudgeService           $evalJudge,
         private readonly LegalRuleExtractorService  $ruleExtractor,
     ) {}
@@ -474,6 +476,11 @@ class LegalChatOrchestratorService
         $timings = $ctx['timings_ms'] ?? [];
 
         $stageStartedAt = microtime(true);
+        $postProcessResult = $this->answerPostProcessor->process($answerText, $ctx);
+        $answerText = $postProcessResult['text'];
+        $timings['answer_postprocess'] = $this->elapsedMs($stageStartedAt);
+
+        $stageStartedAt = microtime(true);
         $citations           = $this->buildCitations($ctx['finalDecisions']);
         $echrCitations       = $this->echrCitationBuilder->build($ctx['echrResults'] ?? []);
         $matsneCitations     = $this->buildMatsneCitations($ctx['matsneResults']     ?? []);
@@ -595,6 +602,10 @@ class LegalChatOrchestratorService
                 'answer_validation' => $answerValidation,
                 'answer_validation_verdict' => $answerValidation['verdict'],
                 'answer_validation_score' => $answerValidation['score'],
+                'answer_postprocess' => [
+                    'changed' => !empty($postProcessResult['changes']),
+                    'changes' => $postProcessResult['changes'],
+                ],
 
                 // ── LLM-as-Judge evaluation (filled later via runEval) ───────
                 'eval' => null,
@@ -619,6 +630,10 @@ class LegalChatOrchestratorService
                 mode:          $ctx['mode'],
                 decisions:     $ctx['finalDecisions'],
                 matsneResults: $ctx['matsneResults'] ?? [],
+                echrResults:   $ctx['echrResults'] ?? [],
+                euResults:     $ctx['euResults'] ?? [],
+                germanResults: $ctx['germanResults'] ?? [],
+                constCourtResults: $ctx['constCourtResults'] ?? [],
             );
 
             Log::info('EvalJudge: completed', [
@@ -726,6 +741,10 @@ class LegalChatOrchestratorService
 
     private function shouldUseSemanticNormSupplement(TriageResult $triage, array $matsneResults, string $userQuestion): bool
     {
+        if (count($this->extractableRuleDocs($matsneResults)) >= 6) {
+            return false;
+        }
+
         if (!$triage->isFastPath()) {
             return true;
         }
@@ -741,6 +760,10 @@ class LegalChatOrchestratorService
     {
         $articleDocs = $this->extractableRuleDocs($matsneResults);
         if (empty($articleDocs)) {
+            return false;
+        }
+
+        if (count($articleDocs) > 8) {
             return false;
         }
 
@@ -1257,20 +1280,67 @@ class LegalChatOrchestratorService
         $primaryLimit = max(1, (int) config('openai.primary_case_limit', 2));
 
         return array_values(array_map(function (array $decision, int $index) use ($primaryLimit) {
-            $isExactCaseCardIssue = ($decision['semantic_relevance']['case_card_legal_issue_exact'] ?? false) === true;
-            $role = ($index < $primaryLimit || $isExactCaseCardIssue) ? 'primary' : 'supporting';
+            $isStrongAuthority = $this->isStrongCourtAuthority($decision, $index, $primaryLimit);
+            $isWeakMatch = $this->hasSemanticRelevanceProfile($decision) && !$isStrongAuthority;
+            $role = $isStrongAuthority ? 'primary' : 'supporting';
 
             $decision['answer_rank'] = $index + 1;
             $decision['answer_role'] = $role;
             $decision['answer_role_label'] = $role === 'primary'
                 ? 'მთავარი შესაბამისი საქმე'
                 : 'დამხმარე მსგავსი საქმე';
-            $decision['usage_instruction'] = $role === 'primary'
-                ? 'Use as a main authority for the legal answer.'
-                : 'Use only as supporting analogous practice if it confirms the same legal issue.';
+            $decision['usage_instruction'] = match (true) {
+                $role === 'primary' => 'Use as a main authority for the legal answer.',
+                $isWeakMatch => 'Weak/analogous match only. Do NOT cite as direct authority; mention only if clearly useful as limited analogy.',
+                default => 'Use only as supporting analogous practice if it confirms the same legal issue.',
+            };
+
+            if ($isWeakMatch) {
+                $decision['quality_flags'] = array_values(array_unique(array_merge(
+                    $decision['quality_flags'] ?? [],
+                    ['weak_context_match'],
+                )));
+            }
 
             return $decision;
         }, $decisions, array_keys($decisions)));
+    }
+
+    private function isStrongCourtAuthority(array $decision, int $index, int $primaryLimit): bool
+    {
+        $semantic = $decision['semantic_relevance'] ?? [];
+
+        if (($semantic['case_card_legal_issue_exact'] ?? false) === true) {
+            return true;
+        }
+
+        $sources = $decision['match_sources'] ?? [];
+        $relevance = (float) ($decision['relevance_score'] ?? 0.0);
+        if (in_array('case_number', $sources, true)
+            || in_array('fingerprint', $sources, true)
+            || (in_array('pasted_text', $sources, true) && $relevance >= 0.95)
+        ) {
+            return true;
+        }
+
+        if (!$this->hasSemanticRelevanceProfile($decision)) {
+            return $index < $primaryLimit;
+        }
+
+        if ($index >= $primaryLimit) {
+            return false;
+        }
+
+        $score = (float) ($decision['semantic_relevance_score'] ?? 0.0);
+        $confidence = $semantic['confidence'] ?? 'low';
+
+        return in_array($confidence, ['high', 'medium'], true) && $score >= 45.0;
+    }
+
+    private function hasSemanticRelevanceProfile(array $decision): bool
+    {
+        return isset($decision['semantic_relevance_score'])
+            || isset($decision['semantic_relevance']['confidence']);
     }
 
     /**

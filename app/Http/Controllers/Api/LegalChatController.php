@@ -196,9 +196,11 @@ class LegalChatController extends Controller
 
                 // ── Stage 3: persist & emit done immediately ──────────────────
                 $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText);
+                $finalText = $assistantMessage->content;
 
                 $emit('done', [
                     'message_id'      => $assistantMessage->id,
+                    'content'         => $finalText,
                     'citations'        => $assistantMessage->meta['citations']          ?? [],
                     'echr_citations'   => $assistantMessage->meta['echr_citations']     ?? [],
                     'law_citations'    => $assistantMessage->meta['law_citations']      ?? [],
@@ -219,7 +221,7 @@ class LegalChatController extends Controller
                 ]);
 
                 // ── Stage 4: eval runs after done (non-blocking UX) ───────────
-                $evalResult = $this->orchestrator->runEval($assistantMessage, $ctx, $fullText);
+                $evalResult = $this->orchestrator->runEval($assistantMessage, $ctx, $finalText);
                 if ($evalResult !== null) {
                     $emit('eval', [
                         'message_id' => $assistantMessage->id,

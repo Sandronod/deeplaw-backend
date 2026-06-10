@@ -30,6 +30,10 @@ class EvalJudgeService
      * @param  string  $mode           detect mode: explain|advise|find|chat|etc.
      * @param  array   $decisions      retrieved court decisions (case_num, excerpt, ...)
      * @param  array   $matsneResults  retrieved matsne docs (title, excerpt, ...)
+     * @param  array   $echrResults    retrieved ECHR docs
+     * @param  array   $euResults      retrieved EU docs
+     * @param  array   $germanResults  retrieved German court docs
+     * @param  array   $constCourtResults retrieved Constitutional Court docs
      * @return array   evaluation result with scores, verdict, issues, summary
      */
     public function evaluate(
@@ -38,8 +42,22 @@ class EvalJudgeService
         string $mode,
         array  $decisions = [],
         array  $matsneResults = [],
+        array  $echrResults = [],
+        array  $euResults = [],
+        array  $germanResults = [],
+        array  $constCourtResults = [],
     ): array {
-        $prompt = $this->buildPrompt($userQuestion, $answerText, $mode, $decisions, $matsneResults);
+        $prompt = $this->buildPrompt(
+            $userQuestion,
+            $answerText,
+            $mode,
+            $decisions,
+            $matsneResults,
+            $echrResults,
+            $euResults,
+            $germanResults,
+            $constCourtResults,
+        );
 
         try {
             $response = Http::withToken($this->apiKey)
@@ -83,29 +101,21 @@ class EvalJudgeService
         string $mode,
         array  $decisions,
         array  $matsneResults,
+        array  $echrResults = [],
+        array  $euResults = [],
+        array  $germanResults = [],
+        array  $constCourtResults = [],
     ): string {
-        // Build source whitelist for citation check
-        $caseNums = collect($decisions)
-            ->pluck('case_num')
-            ->filter()
-            ->values()
-            ->implode(', ');
+        $sourcesBlock = $this->buildSourcesBlock(
+            $decisions,
+            $matsneResults,
+            $echrResults,
+            $euResults,
+            $germanResults,
+            $constCourtResults,
+        );
 
-        $matsneTitles = collect($matsneResults)
-            ->pluck('title')
-            ->filter()
-            ->map(fn($t) => mb_substr($t, 0, 80))
-            ->values()
-            ->implode('; ');
-
-        $sourcesBlock = '';
-        if ($caseNums) {
-            $sourcesBlock .= "Court decisions available: {$caseNums}\n";
-        }
-        if ($matsneTitles) {
-            $sourcesBlock .= "Legislation available: {$matsneTitles}\n";
-        }
-        if (!$sourcesBlock) {
+        if ($sourcesBlock === '') {
             $sourcesBlock = "No sources were retrieved from the database.\n";
         }
 
@@ -119,7 +129,7 @@ class EvalJudgeService
             default             => 'IRAC structure is expected for legal questions.',
         };
 
-        $answerExcerpt = mb_substr($answer, 0, 3000);
+        $answerExcerpt = mb_substr($answer, 0, 12000);
 
         return <<<PROMPT
 You are a senior Georgian legal expert and AI evaluator. Your task is to evaluate the quality of an AI-generated legal answer.
@@ -146,6 +156,11 @@ Evaluate the answer on these 5 dimensions (score 0-10 each):
 4. **completeness** — Does the answer address all aspects of the user question?
 5. **no_hallucination** — Are all facts, case numbers, and legal rules grounded in the available sources or well-established Georgian law? (10 = no hallucination, 0 = fabricated facts)
 
+Important evaluation rules:
+- If an answer explicitly says "direct precedent was not found" and labels a retrieved case as analogy/supporting context, do not punish it as hallucination merely because it is not a direct precedent.
+- Constitutional Court, ECHR, EU, and German sources listed below are valid retrieved sources for citation validity. Do not require them to appear in the domestic court-decision list.
+- For legislation, article numbers are valid when the corresponding Matsne source/article is listed below.
+
 Return ONLY valid JSON (no markdown, no explanation outside JSON):
 {
   "scores": {
@@ -162,6 +177,106 @@ Return ONLY valid JSON (no markdown, no explanation outside JSON):
   "summary": "<2-3 sentence evaluation in Georgian>"
 }
 PROMPT;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $decisions
+     * @param array<int, array<string, mixed>> $matsneResults
+     * @param array<int, array<string, mixed>> $echrResults
+     * @param array<int, array<string, mixed>> $euResults
+     * @param array<int, array<string, mixed>> $germanResults
+     * @param array<int, array<string, mixed>> $constCourtResults
+     */
+    private function buildSourcesBlock(
+        array $decisions,
+        array $matsneResults,
+        array $echrResults,
+        array $euResults,
+        array $germanResults,
+        array $constCourtResults,
+    ): string {
+        $lines = [];
+
+        foreach ($decisions as $decision) {
+            $caseNum = $decision['case_num'] ?? null;
+            if (!$caseNum) {
+                continue;
+            }
+            $role = $decision['answer_role'] ?? 'source';
+            $lines[] = sprintf(
+                '- Georgian court decision: %s | role=%s | date=%s | excerpt=%s',
+                $caseNum,
+                $role,
+                $decision['case_date'] ?? 'N/A',
+                $this->shortSourceText($decision['excerpt'] ?? $decision['full_text'] ?? $decision['content'] ?? ''),
+            );
+        }
+
+        foreach ($matsneResults as $doc) {
+            $article = $doc['_article_num'] ?? $doc['article_num'] ?? null;
+            $articleText = $article ? " | article={$article}" : '';
+            $lines[] = sprintf(
+                '- Legislation/Matsne: %s%s | url=%s | excerpt=%s',
+                $doc['title'] ?? 'N/A',
+                $articleText,
+                $doc['url'] ?? 'N/A',
+                $this->shortSourceText($doc['excerpt'] ?? $doc['content'] ?? $doc['text'] ?? ''),
+            );
+        }
+
+        foreach ($constCourtResults as $doc) {
+            $lines[] = sprintf(
+                '- Constitutional Court: %s | legal_id=%s | date=%s | url=%s | excerpt=%s',
+                $doc['case_number'] ?? $doc['legal_id'] ?? 'N/A',
+                $doc['legal_id'] ?? 'N/A',
+                $doc['decision_date'] ?? 'N/A',
+                $doc['url'] ?? 'N/A',
+                $this->shortSourceText($doc['excerpt'] ?? $doc['summary'] ?? $doc['content'] ?? ''),
+            );
+        }
+
+        foreach ($echrResults as $doc) {
+            $lines[] = sprintf(
+                '- ECHR: %s | application=%s | url=%s | excerpt=%s',
+                $doc['title'] ?? $doc['case_name'] ?? 'N/A',
+                $doc['application_no'] ?? $doc['application_number'] ?? 'N/A',
+                $doc['url'] ?? 'N/A',
+                $this->shortSourceText($doc['excerpt'] ?? $doc['summary'] ?? $doc['content'] ?? ''),
+            );
+        }
+
+        foreach ($euResults as $doc) {
+            $lines[] = sprintf(
+                '- EU source: %s | citation=%s | url=%s | excerpt=%s',
+                $doc['title'] ?? $doc['case_name'] ?? 'N/A',
+                $doc['citation'] ?? $doc['celex'] ?? 'N/A',
+                $doc['url'] ?? 'N/A',
+                $this->shortSourceText($doc['excerpt'] ?? $doc['summary'] ?? $doc['content'] ?? ''),
+            );
+        }
+
+        foreach ($germanResults as $doc) {
+            $lines[] = sprintf(
+                '- German court source: %s | citation=%s | url=%s | excerpt=%s',
+                $doc['title'] ?? $doc['case_name'] ?? 'N/A',
+                $doc['citation'] ?? $doc['case_number'] ?? 'N/A',
+                $doc['url'] ?? 'N/A',
+                $this->shortSourceText($doc['excerpt'] ?? $doc['summary'] ?? $doc['content'] ?? ''),
+            );
+        }
+
+        return implode("\n", array_slice($lines, 0, 40));
+    }
+
+    private function shortSourceText(mixed $value): string
+    {
+        if (!is_scalar($value)) {
+            return '';
+        }
+
+        $text = trim(preg_replace('/\s+/u', ' ', (string) $value) ?? '');
+
+        return mb_substr($text, 0, 700);
     }
 
     // ── Parser ────────────────────────────────────────────────────────────────
