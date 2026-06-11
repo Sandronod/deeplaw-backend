@@ -30,6 +30,7 @@ class TriageResult
         public readonly int       $complexityScore = 50,
         public readonly string    $complexityLevel = 'normal', // 'fast' | 'normal' | 'full'
         public readonly array     $complexityReasons = [],
+        public readonly array     $queryNormalization = [],
     ) {}
 
     public static function chat(): self
@@ -87,6 +88,7 @@ class TriageResult
             'complexity_score' => $this->complexityScore,
             'complexity_level' => $this->complexityLevel,
             'complexity_reasons' => $this->complexityReasons,
+            'query_normalization' => $this->queryNormalization,
             'issue_count'      => $this->issueList->issueCount,
         ];
     }

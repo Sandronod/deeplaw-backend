@@ -139,6 +139,35 @@
             }
         },
         {
+            "id": "civil_procedure_magistrate_counterclaim_value",
+            "type": "norm",
+            "sources": ["matsne"],
+            "query": "ძირითადი სარჩელით მოთხოვნილია უკანონო მფლობელობიდან ნივთის გამოთხოვა. სარჩელი მიღებულია წარმოებაში მაგისტრატი მოსამართლის მიერ. მოსამზადებელ სხდომაზე მოპასუხემ შემოიტანა შეგებებული სარჩელი და ითხოვს მესაკუთრედ ცნობას, თუმცა სარჩელის ფასია 50 000 ლარი. ეს ორივე სარჩელი მაგისტრატი მოსამართლის განსჯადია?",
+            "expected": {
+                "matsne": [
+                    {"matsne_id": 29962, "articles": [9, 188]}
+                ],
+                "rule_triggers": [
+                    "civil_procedure.magistrate_claim_value",
+                    "civil_procedure.counterclaim_subject_matter_guard",
+                    "civil_procedure.counterclaim_preparatory_stage_guard"
+                ],
+                "outcome_categories": [
+                    "procedural_outcome.subject_matter_jurisdiction",
+                    "procedural_outcome.counterclaim_admissibility"
+                ],
+                "outcomes": [
+                    "subject_matter_jurisdiction.magistrate",
+                    "counterclaim_admissibility.check_subject_matter_jurisdiction",
+                    "counterclaim_admissibility.check_preparatory_stage"
+                ],
+                "facts": [
+                    {"key": "counterclaim_value", "value": 50000},
+                    {"key": "procedural_stage", "value": "preparatory_hearing"}
+                ]
+            }
+        },
+        {
             "id": "civil_procedure_article_47",
             "type": "norm",
             "sources": ["matsne"],

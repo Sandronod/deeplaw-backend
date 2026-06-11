@@ -309,4 +309,47 @@ class AnswerValidatorServiceTest extends TestCase
         $this->assertSame('pass', $result['verdict']);
         $this->assertSame([], $result['flags']);
     }
+
+    public function test_it_flags_contradictory_magistrate_threshold_boundary_application(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: 'ორივე სარჩელი არ არის მაგისტრატი მოსამართლის საგნობრივი განსჯადობის ფარგლებში, თუ სარჩელის ფასი ზუსტად 50 000 ლარია ან აღემატება მას. მაგისტრატი მოსამართლე განიხილავს მხოლოდ იმ საქმეებს, სადაც სარჩელის ფასი არ აღემატება 50 000 ლარს. თუ სარჩელის ფასი ზუსტად 50 000 ლარია, საქმე განიხილება მაგისტრატი მოსამართლის მიერ.',
+            matsneResults: [
+                [
+                    '_article_num' => 9,
+                    'title' => 'საქართველოს სამოქალაქო საპროცესო კოდექსი',
+                    'excerpt' => 'მაგისტრატი მოსამართლე განიხილავს ქონებრივ დავებს, თუ სარჩელის ფასი არ აღემატება 50 000 ლარს.',
+                ],
+            ],
+        );
+
+        $flagTypes = array_column($result['flags'], 'type');
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('wrong_threshold_boundary', $flagTypes);
+        $this->assertContains('contradictory_boundary_application', $flagTypes);
+        $this->assertContains('50000', $result['checked']['answer_legal_numbers']);
+    }
+
+    public function test_it_allows_correct_magistrate_threshold_boundary_application(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: 'თუ სარჩელის ფასი ზუსტად 50 000 ლარია, ეს არ აღემატება ზღვარს და საქმე მაგისტრატი მოსამართლის განსჯადია. 50 000 ლარზე მეტი მოთხოვნა კი რაიონული სასამართლოს განსჯადობაზე მიუთითებს.',
+            matsneResults: [
+                [
+                    '_article_num' => 9,
+                    'title' => 'საქართველოს სამოქალაქო საპროცესო კოდექსი',
+                    'excerpt' => 'მაგისტრატი მოსამართლე განიხილავს ქონებრივ დავებს, თუ სარჩელის ფასი არ აღემატება 50 000 ლარს.',
+                ],
+            ],
+        );
+
+        $this->assertSame('pass', $result['verdict']);
+        $this->assertSame([], $result['flags']);
+        $this->assertSame(['50000'], $result['checked']['answer_legal_numbers']);
+    }
 }

@@ -66,6 +66,24 @@ class LegalTriageComplexityTest extends TestCase
         $this->assertContains('norms_and_cases', $result['reasons']);
     }
 
+    public function test_it_marks_single_boundary_question_as_fast_rule_application(): void
+    {
+        $question = 'ძირითადი სარჩელის ფასი არის ზუსტად 50 000 ლარი და მოპასუხის შეგებებული სარჩელიც 50 000 ლარია. ნიშნავს თუ არა ეს მაგისტრატი მოსამართლის ზღვრის გადაცილებას?';
+
+        $result = $this->classify(
+            question: $question,
+            mode: 'explain',
+            domains: ['procedure'],
+            needsNorms: true,
+            needsCases: false,
+            activeSources: ['court', 'matsne'],
+        );
+
+        $this->assertSame('fast', $result['level']);
+        $this->assertContains('simple_rule_application', $result['reasons']);
+        $this->assertNotContains('fact_pattern_or_strategy', $result['reasons']);
+    }
+
     public function test_it_routes_simple_exact_article_lookup_as_norm_only(): void
     {
         $this->assertTrue($this->simpleDomesticNormLookup(
@@ -79,6 +97,14 @@ class LegalTriageComplexityTest extends TestCase
         $this->assertFalse($this->simpleDomesticNormLookup(
             'სამოქალაქო კოდექსის 54-ე მუხლზე სასამართლო პრაქტიკა მომიძებნე',
             'find',
+        ));
+    }
+
+    public function test_it_detects_single_rule_application_without_exact_article(): void
+    {
+        $this->assertTrue($this->simpleRuleApplication(
+            'მხარემ სააპელაციო საჩივარი შეიტანა გადაწყვეტილების ჩაბარებიდან 15-ე დღეს. უნდა შემოწმდეს თუ არა ჩაბარების თარიღი და შესაბამისი ვადა?',
+            'explain',
         ));
     }
 
@@ -112,5 +138,13 @@ class LegalTriageComplexityTest extends TestCase
         $method = new ReflectionMethod($service, 'isSimpleDomesticNormLookup');
 
         return $method->invoke($service, $question, $mode, true);
+    }
+
+    private function simpleRuleApplication(string $question, string $mode): bool
+    {
+        $service = (new ReflectionClass(LegalTriageService::class))->newInstanceWithoutConstructor();
+        $method = new ReflectionMethod($service, 'isSimpleRuleApplicationQuestion');
+
+        return $method->invoke($service, $question, $mode);
     }
 }

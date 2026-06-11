@@ -30,6 +30,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         private readonly CitationVerifierService    $citationVerifier,
         private readonly LegalRuleExtractorService  $ruleExtractor,
         private readonly LegalRemedyGuardService    $remedyGuard,
+        private readonly LegalConsequenceTaxonomyService $consequenceTaxonomy,
     ) {
         $this->apiKey      = config('openai.api_key');
         $this->model       = config('openai.chat_model', 'gpt-4.1');
@@ -65,7 +66,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         array           $euResults = [],
         array           $germanResults = [],
         array           $constCourtResults = [],
-        array           $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'],
+        array           $sources = [],
         ?IssueList      $issueList = null,
         ?TriageResult   $triage = null,
         array           $extractedRules = [],
@@ -132,9 +133,12 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         $glossaryBlock      = $userQuestion ? $this->glossary->buildPromptBlock($userQuestion, 8) : '';
         $domainContext      = $this->buildDomainContextBlock($triage);
         $statutoryRules     = $this->buildStatutoryRulesBlock($triage);
+        $responseBudget     = $this->buildResponseBudgetInstruction($mode, $triage);
 
         return <<<PROMPT
 შენ ხარ პროფესიონალი იურიდიული ასისტენტი (Legal Copilot), რომელიც ეხმარება იურისტებს სასამართლო პრაქტიკის ანალიზში.
+
+{$responseBudget}
 
 {$domainContext}
 
@@ -314,6 +318,40 @@ ACTIVE MODE instruction (ქვემოთ) თუ სხვა სტრუქ
 PROMPT;
     }
 
+    private function buildResponseBudgetInstruction(string $mode, ?TriageResult $triage): string
+    {
+        $level = (string) ($triage?->complexityLevel ?? 'normal');
+        $isResearchMode = in_array($mode, ['advocate', 'compare', 'summarize', 'find'], true)
+            || in_array($level, ['complex', 'full'], true);
+
+        if ($isResearchMode) {
+            return <<<INST
+RESPONSE BUDGET (STRICT)
+- This section overrides later DEFAULT RESPONSE STRUCTURE and IRAC instructions when they conflict.
+- Answer in Georgian unless the user asks otherwise.
+- Keep the answer focused. Use only the legal issues that matter to the question.
+- Do not list every retrieved source. Cite the best 5-8 sources unless the user explicitly asks for full research.
+- Start with a direct conclusion, then analysis. Avoid repeating the facts.
+- When the result depends on timing, amount, procedural stage, written request, expiry, or another boundary fact, state that boundary explicitly.
+INST;
+        }
+
+        return <<<INST
+RESPONSE BUDGET (STRICT)
+- This section overrides every later DEFAULT RESPONSE STRUCTURE, ACTIVE MODE IRAC, and issue-spotter instruction when they conflict.
+- Answer in Georgian unless the user asks otherwise.
+- Ordinary legal Q&A must be short: about 6-10 concise sentences total, unless the user asks for a memo.
+- Start exactly with "პირდაპირი პასუხი:" in 2-4 sentences. Do not start with "✅ დასკვნა და შეჯამება".
+- Then add "წესი და გამოყენება:" with up to 3 bullets.
+- Add "სიფრთხილე:" only if a missing fact or boundary changes the result.
+- Do not use long IRAC headings for ordinary questions.
+- Never produce numbered issue cards like "[1] ... Issue: Rule: Cases: Apply: Conclude:" for ordinary legal Q&A.
+- Analyze only the boundary asked by the user. Do not add side issues such as ownership, eviction, damages, or full merits unless they are necessary to answer the asked boundary.
+- Do not list every retrieved source. Use only the best 3-5 sources in the answer.
+- Avoid categorical outcomes when a boundary fact matters. Prefer "თუ..." / "მაგრამ თუ..." rather than an unconditional conclusion.
+INST;
+    }
+
     private function buildDomainContextBlock(?TriageResult $triage): string
     {
         if (!$triage || $triage->isChatOnly()) {
@@ -375,10 +413,15 @@ PROMPT;
         $hasLabor     = in_array('labor', $domains);
 
         if ($hasCivilProc) {
+            $magistrateLines = $this->consequenceTaxonomy->summaryLines('civil_procedure.magistrate_claim_value');
+            $magistrateSummary = implode("\n", array_map(fn (string $line) => "• {$line}", $magistrateLines));
+            if ($magistrateSummary === '') {
+                $magistrateSummary = '• მაგისტრატი მოსამართლე: საგნობრივი განსჯადობა განისაზღვრება მოქმედი საპროცესო ნორმით';
+            }
+
             $rules[] = <<<RULES
 📋 სამოქალაქო საპროცესო სამართლი — ძირითადი ზღვრები (სსკ):
-• მაგისტრატი მოსამართლე: სარჩელის ფასი ≤ 50 000 ₾ (სსკ მე-9 მუხლი)
-• სარჩელის ფასი > 50 000 ₾ → რაიონული სასამართლო
+{$magistrateSummary}
 • სსკ 21-ე მუხლი — განსჯადობაზე შეთანხმება:
   ✅ ვრცელდება: ტერიტორიული განსჯადობა (სად განიხილოს)
   ❌ არ ვრცელდება: საგნობრივი განსჯადობა (ვინ განიხილოს — მაგ. მაგ. მოს. vs რაიონული)
@@ -684,11 +727,32 @@ INST,
         };
     }
 
+    private function contextDecisionLimit(string $mode): int
+    {
+        $isComplexMode = in_array($mode, ['advocate', 'compare', 'summarize', 'find'], true);
+        $configKey = $isComplexMode ? 'openai.max_context_decisions_complex' : 'openai.max_context_decisions_default';
+
+        return $this->contextConfigLimit($configKey, $isComplexMode ? 5 : 3);
+    }
+
+    private function contextConfigLimit(string $key, int $fallback): int
+    {
+        return max(0, (int) config($key, $fallback));
+    }
+
     // ── Context Block ─────────────────────────────────────────────────────────
 
     private function buildContextBlock(array $decisions, int $totalFound = 0, string $mode = 'explain', array $lawResults = [], array $echrResults = [], array $matsneResults = [], array $euResults = [], array $germanResults = [], array $constCourtResults = []): string
     {
         $parts = [];
+
+        $decisions         = array_slice($decisions, 0, $this->contextDecisionLimit($mode));
+        $lawResults        = array_slice($lawResults, 0, $this->contextConfigLimit('openai.max_law_context_results', 4));
+        $matsneResults     = array_slice($matsneResults, 0, $this->contextConfigLimit('openai.max_matsne_context_results', 4));
+        $echrResults       = array_slice($echrResults, 0, $this->contextConfigLimit('openai.max_echr_context_results', 2));
+        $euResults         = array_slice($euResults, 0, $this->contextConfigLimit('openai.max_eu_context_results', 2));
+        $germanResults     = array_slice($germanResults, 0, $this->contextConfigLimit('openai.max_german_context_results', 2));
+        $constCourtResults = array_slice($constCourtResults, 0, $this->contextConfigLimit('openai.max_const_court_context_results', 2));
 
         // ── Verified sources whitelist — LLM-ს ეუბნება რომელი ნომრები "აქვს" ──
         $verifiedBlock = $this->citationVerifier->buildVerifiedSourcesBlock($decisions, $matsneResults);
@@ -1170,7 +1234,7 @@ BLOCK;
         array           $euResults = [],
         array           $germanResults = [],
         array           $constCourtResults = [],
-        array           $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'],
+        array           $sources = [],
         ?IssueList      $issueList = null,
         ?TriageResult   $triage = null,
         array           $extractedRules = [],

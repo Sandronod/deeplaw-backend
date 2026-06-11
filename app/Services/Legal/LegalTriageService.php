@@ -43,14 +43,19 @@ class LegalTriageService
 
         // ── 2. Mode (no API call) ─────────────────────────────────────────────
         $mode = $this->intentClassifier->classifyMode($question);
+        $wantsMatsnePre = empty($activeSources) || in_array('matsne', $activeSources, true);
+        $simpleRuleApplication = $wantsMatsnePre && $this->isSimpleRuleApplicationQuestion($question, $mode);
 
         // ── 3. Search terms + domain (GPT-4.1-mini, single call) ────────────
-        ['query' => $searchQuery, 'domain' => $llmDomain] = $this->queryExtractor->extractWithDomain($question);
+        $queryExtraction = $this->queryExtractor->extractWithDomain($question);
+        $searchQuery = $queryExtraction['query'];
+        $llmDomain = $queryExtraction['domain'] ?? null;
+        $queryNormalization = $queryExtraction['normalization'] ?? [];
 
         // ── 4. Issue spotting — only for complex/advise cases ─────────────────
         $issueList  = IssueList::empty();
-        $shouldSpot = in_array($mode, ['advise', 'advocate'])
-            || mb_strlen($question) > 150;
+        $shouldSpot = !$simpleRuleApplication
+            && (in_array($mode, ['advise', 'advocate']) || mb_strlen($question) > 150);
 
         if ($shouldSpot) {
             $issueList = $this->issueSpotter->spot($question);
@@ -103,10 +108,11 @@ class LegalTriageService
         $isCriminal = $caseType === 'criminal';
 
         $needsNorms      = $wantsMatsne;
-        $needsCases      = $wantsCourt      && !$simpleDomesticNormLookup;
-        $needsConstCourt = $wantsConstCourt && !$isCriminal && !$simpleDomesticNormLookup;
-        $needsEu         = $wantsEu         && !$isCriminal && !$simpleDomesticNormLookup;
-        $needsGerman     = $wantsGerman     && !$isCriminal && !$simpleDomesticNormLookup;
+        $normOnlyAnswer  = $simpleDomesticNormLookup || $simpleRuleApplication;
+        $needsCases      = $wantsCourt      && !$normOnlyAnswer;
+        $needsConstCourt = $wantsConstCourt && !$isCriminal && !$normOnlyAnswer;
+        $needsEu         = $wantsEu         && !$isCriminal && !$normOnlyAnswer;
+        $needsGerman     = $wantsGerman     && !$isCriminal && !$normOnlyAnswer;
 
         $complexity = $this->classifyComplexity(
             question:      $question,
@@ -135,6 +141,7 @@ class LegalTriageService
             complexityScore:  $complexity['score'],
             complexityLevel:  $complexity['level'],
             complexityReasons: $complexity['reasons'],
+            queryNormalization: $queryNormalization,
         );
 
         Log::debug('Triage: complete', $result->toDebugArray());
@@ -204,6 +211,104 @@ class LegalTriageService
         return $caseType;
     }
 
+    private function isSimpleRuleApplicationQuestion(string $question, string $mode): bool
+    {
+        if (!in_array($mode, ['explain', 'find', 'summarize'], true)) {
+            return false;
+        }
+
+        $question = trim($question);
+        if ($question === '' || mb_strlen($question) > 520) {
+            return false;
+        }
+
+        if ($this->questionMarkCount($question) > 1) {
+            return false;
+        }
+
+        if ($this->hasCourtPracticeSignals($question) || $this->hasInternationalOrComparativeSignals($question)) {
+            return false;
+        }
+
+        return $this->hasDecisionPromptSignal($question)
+            && $this->hasRuleBoundarySignal($question);
+    }
+
+    private function questionMarkCount(string $question): int
+    {
+        return substr_count($question, '?') + substr_count($question, '？');
+    }
+
+    private function hasDecisionPromptSignal(string $question): bool
+    {
+        $lower = mb_strtolower($question);
+        $signals = [
+            'შეუძლია თუ არა',
+            'უნდა თუ არა',
+            'უნდა შემოწმდეს',
+            'ნიშნავს თუ არა',
+            'არის თუ არა',
+            'შეიძლება თუ არა',
+            'აქვს თუ არა',
+            'დასაშვებია თუ არა',
+            'განსჯადია',
+            'ვადაშია',
+            'can ',
+            'whether',
+            'does ',
+            'should ',
+        ];
+
+        foreach ($signals as $signal) {
+            if (str_contains($lower, $signal)) {
+                return true;
+            }
+        }
+
+        return $this->questionMarkCount($question) === 1;
+    }
+
+    private function hasRuleBoundarySignal(string $question): bool
+    {
+        $lower = mb_strtolower($question);
+
+        if (preg_match('/\d[\d\s,.]*(?:ლარ|₾|დღ|თვ|წელ|%)/u', $lower)) {
+            return true;
+        }
+
+        $signals = [
+            'ვად',
+            'ჩაბარ',
+            'სააპელაციო',
+            'საკასაციო',
+            'საჩივ',
+            'ხანდაზმ',
+            'ფას',
+            'თანხ',
+            'ზღვ',
+            'მაგისტრატ',
+            'განსჯად',
+            'შეგებებულ',
+            'ნაკლ',
+            'შეტყობ',
+            'აცნობ',
+            'შეწყვეტ',
+            'გათავისუფლ',
+            'დასაბუთ',
+            'ადმინისტრაციული აქტი',
+            'ბათილ',
+            'უფლება',
+        ];
+
+        foreach ($signals as $signal) {
+            if (str_contains($lower, $signal)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private function isSimpleDomesticNormLookup(string $question, string $mode, bool $wantsMatsne): bool
     {
         if (!$wantsMatsne || !$this->hasExactArticleReference($question)) {
@@ -223,10 +328,11 @@ class LegalTriageService
     {
         $lower = mb_strtolower($question);
         $signals = [
-            'სასამართლო',
+            'სასამართლო პრაქტიკ',
             'პრაქტიკ',
-            'გადაწყვეტილ',
-            'საქმე',
+            'სასამართლო გადაწყვეტილ',
+            'გადაწყვეტილებებ',
+            'გადაწყვეტილება მომიძებნ',
             'პრეცედენტ',
             'უზენაეს',
             'court',
@@ -287,6 +393,7 @@ class LegalTriageService
         $sourceCount = count($activeSources);
         $hasExactArticle = $this->hasExactArticleReference($question);
         $hasExactCase = $this->hasExactCaseNumber($question);
+        $simpleRuleApplication = $this->isSimpleRuleApplicationQuestion($question, $mode);
 
         if ($length <= 160) {
             $score -= 10;
@@ -310,6 +417,11 @@ class LegalTriageService
         if ($hasExactCase) {
             $score -= 18;
             $reasons[] = 'exact_case_number';
+        }
+
+        if ($simpleRuleApplication) {
+            $score -= 18;
+            $reasons[] = 'simple_rule_application';
         }
 
         if ($issueList->issueCount >= 3 || $issueList->isComplex) {
@@ -346,7 +458,7 @@ class LegalTriageService
             $reasons[] = "mode_{$mode}";
         }
 
-        if ($this->hasFactPatternSignals($question)) {
+        if ($this->hasFactPatternSignals($question) && !$simpleRuleApplication) {
             $score += 15;
             $reasons[] = 'fact_pattern_or_strategy';
         }

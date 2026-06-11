@@ -22,17 +22,37 @@ class LegalBenchmarkScorer
         $expectedEchrApplications = $this->normalizeApplicationNumbers($expected['echr_applications'] ?? []);
         $actualEchrApplications = $this->actualEchrApplicationNumbers($topEchr);
 
+        $expectedRuleTriggers = $this->stringList($expected['rule_triggers'] ?? []);
+        $actualRuleTriggers = $this->stringList($actual['rule_triggers'] ?? []);
+
+        $expectedOutcomeCategories = $this->stringList($expected['outcome_categories'] ?? []);
+        $actualOutcomeCategories = $this->stringList($actual['outcome_categories'] ?? []);
+
+        $expectedOutcomes = $this->stringList($expected['outcomes'] ?? []);
+        $actualOutcomes = $this->stringList($actual['outcomes'] ?? []);
+
+        $expectedFacts = $this->expectedFactKeys($expected);
+        $actualFacts = $this->actualFactKeys($actual['facts'] ?? []);
+
         $forbidden = $this->forbiddenHits($expected, $topMatsne);
 
         $law = $this->metric($expectedLawIds, $actualLawIds);
         $articles = $this->metric($expectedArticleKeys, $actualArticleKeys);
         $cases = $this->metric($expectedCaseIds, $actualCaseIds);
         $echr = $this->metric($expectedEchrApplications, $actualEchrApplications);
+        $ruleTriggers = $this->metric($expectedRuleTriggers, $actualRuleTriggers);
+        $outcomeCategories = $this->metric($expectedOutcomeCategories, $actualOutcomeCategories);
+        $outcomes = $this->metric($expectedOutcomes, $actualOutcomes);
+        $facts = $this->metric($expectedFacts, $actualFacts);
 
         $passed = $this->metricPassed($law)
             && $this->metricPassed($articles)
             && $this->metricPassed($cases)
             && $this->metricPassed($echr)
+            && $this->metricPassed($ruleTriggers)
+            && $this->metricPassed($outcomeCategories)
+            && $this->metricPassed($outcomes)
+            && $this->metricPassed($facts)
             && empty($forbidden);
 
         return [
@@ -43,18 +63,30 @@ class LegalBenchmarkScorer
             'articles' => $articles,
             'cases' => $cases,
             'echr' => $echr,
+            'rule_triggers' => $ruleTriggers,
+            'outcome_categories' => $outcomeCategories,
+            'outcomes' => $outcomes,
+            'facts' => $facts,
             'forbidden_hits' => $forbidden,
             'missing' => [
                 'laws' => array_values(array_diff($expectedLawIds, $actualLawIds)),
                 'articles' => array_values(array_diff($expectedArticleKeys, $actualArticleKeys)),
                 'cases' => array_values(array_diff($expectedCaseIds, $actualCaseIds)),
                 'echr_applications' => array_values(array_diff($expectedEchrApplications, $actualEchrApplications)),
+                'rule_triggers' => array_values(array_diff($expectedRuleTriggers, $actualRuleTriggers)),
+                'outcome_categories' => array_values(array_diff($expectedOutcomeCategories, $actualOutcomeCategories)),
+                'outcomes' => array_values(array_diff($expectedOutcomes, $actualOutcomes)),
+                'facts' => array_values(array_diff($expectedFacts, $actualFacts)),
             ],
             'actual' => [
                 'laws' => $actualLawIds,
                 'articles' => $actualArticleKeys,
                 'case_ids' => $actualCaseIds,
                 'echr_applications' => $actualEchrApplications,
+                'rule_triggers' => $actualRuleTriggers,
+                'outcome_categories' => $actualOutcomeCategories,
+                'outcomes' => $actualOutcomes,
+                'facts' => $actualFacts,
             ],
         ];
     }
@@ -70,6 +102,10 @@ class LegalBenchmarkScorer
             'articles' => ['matched' => 0, 'total' => 0, 'rate' => null],
             'cases' => ['matched' => 0, 'total' => 0, 'rate' => null],
             'echr' => ['matched' => 0, 'total' => 0, 'rate' => null],
+            'rule_triggers' => ['matched' => 0, 'total' => 0, 'rate' => null],
+            'outcome_categories' => ['matched' => 0, 'total' => 0, 'rate' => null],
+            'outcomes' => ['matched' => 0, 'total' => 0, 'rate' => null],
+            'facts' => ['matched' => 0, 'total' => 0, 'rate' => null],
         ];
 
         foreach ($scores as $score) {
@@ -81,7 +117,7 @@ class LegalBenchmarkScorer
 
             $summary['forbidden_hit_count'] += count($score['forbidden_hits'] ?? []);
 
-            foreach (['law', 'articles', 'cases', 'echr'] as $metric) {
+            foreach (['law', 'articles', 'cases', 'echr', 'rule_triggers', 'outcome_categories', 'outcomes', 'facts'] as $metric) {
                 if (($score[$metric]['total'] ?? 0) > 0) {
                     $summary[$metric]['matched'] += $score[$metric]['matched'];
                     $summary[$metric]['total'] += $score[$metric]['total'];
@@ -89,7 +125,7 @@ class LegalBenchmarkScorer
             }
         }
 
-        foreach (['law', 'articles', 'cases', 'echr'] as $metric) {
+        foreach (['law', 'articles', 'cases', 'echr', 'rule_triggers', 'outcome_categories', 'outcomes', 'facts'] as $metric) {
             if ($summary[$metric]['total'] > 0) {
                 $summary[$metric]['rate'] = $summary[$metric]['matched'] / $summary[$metric]['total'];
             }
@@ -194,6 +230,49 @@ class LegalBenchmarkScorer
     {
         return ($metric['total'] ?? 0) === 0
             || (($metric['matched'] ?? 0) === ($metric['total'] ?? 0));
+    }
+
+    private function stringList(array $items): array
+    {
+        return array_values(array_unique(array_filter(array_map(
+            fn ($item) => trim((string) $item),
+            $items,
+        ), fn (string $item) => $item !== '')));
+    }
+
+    private function expectedFactKeys(array $expected): array
+    {
+        return $this->factKeys($expected['facts'] ?? []);
+    }
+
+    private function actualFactKeys(array $facts): array
+    {
+        return $this->factKeys($facts);
+    }
+
+    private function factKeys(array $facts): array
+    {
+        $keys = [];
+
+        foreach ($facts as $fact) {
+            if (!is_array($fact) || !isset($fact['key'])) {
+                continue;
+            }
+
+            $value = $fact['value'] ?? null;
+            $key = (string) $fact['key'];
+            if ($value !== null) {
+                $key .= '=' . (is_numeric($value) ? (string) (int) $value : (string) $value);
+            }
+
+            if (isset($fact['unit']) && $fact['unit'] !== '') {
+                $key .= ':' . (string) $fact['unit'];
+            }
+
+            $keys[] = $key;
+        }
+
+        return array_values(array_unique($keys));
     }
 
     private function forbiddenHits(array $expected, array $matsneResults): array

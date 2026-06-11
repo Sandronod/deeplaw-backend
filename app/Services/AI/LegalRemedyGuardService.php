@@ -13,6 +13,8 @@ use App\DTOs\TriageResult;
  */
 class LegalRemedyGuardService
 {
+    private LegalConsequenceTaxonomyService $consequenceTaxonomy;
+
     private const OUTCOME_KEYWORDS = [
         'invalidity' => [
             'label' => 'ბათილობა / არარა შედეგი',
@@ -48,6 +50,11 @@ class LegalRemedyGuardService
         ],
     ];
 
+    public function __construct(?LegalConsequenceTaxonomyService $consequenceTaxonomy = null)
+    {
+        $this->consequenceTaxonomy = $consequenceTaxonomy ?? new LegalConsequenceTaxonomyService();
+    }
+
     /**
      * @param array<int, array<string, mixed>> $matsneResults
      * @param array<int, array<string, mixed>> $decisions
@@ -67,8 +74,9 @@ class LegalRemedyGuardService
         $hasDefectRemedySources = $this->hasDefectRemedySources($matsneResults);
         $hasDefectNoticeSources = $this->hasDefectNoticeSources($matsneResults);
         $hasWeakCases = $this->hasWeakCourtSources($decisions);
+        $consequenceBlock = $this->consequenceTaxonomy->buildPromptBlock($question, $triage);
 
-        if (empty($questionOutcomes) && empty($sourceRows) && !$hasDefectRemedySources && !$hasDefectNoticeSources && !$hasWeakCases) {
+        if (empty($questionOutcomes) && empty($sourceRows) && !$hasDefectRemedySources && !$hasDefectNoticeSources && !$hasWeakCases && $consequenceBlock === '') {
             return '';
         }
 
@@ -80,8 +88,13 @@ class LegalRemedyGuardService
             '1. ერთმანეთისგან გამიჯნე სამართლებრივი საფუძველი და სამართლებრივი შედეგი.',
             '2. არ გადაარქვა ერთი remedy მეორედ: მოშლა ≠ ბათილობა; შეცილება ≠ ავტომატური ბათილობა; ფასის შემცირება ≠ ზიანის ანაზღაურება.',
             '3. თუ ნორმა იძლევა კონკრეტულ დაცვის საშუალებას, პასუხში სწორედ ის დაასახელე. არ გააფართოო შედეგი წყაროს გარეშე.',
-            '4. თუ რამდენიმე რეჟიმი იკვეთება, გაანალიზე ცალ-ცალკე: ბათილობა/შეცილება, ნაკლის remedies, ხანდაზმულობა, ზიანი.',
+            '4. თუ რამდენიმე რეჟიმი იკვეთება, გაანალიზე ცალ-ცალკე: ბათილობა/შეცილება, ნაკლის remedies, ხანდაზმულობა, ზიანი, საგნობრივი განსჯადობა, პროცედურული ვადები.',
         ];
+
+        if ($consequenceBlock !== '') {
+            $lines[] = '';
+            $lines[] = $consequenceBlock;
+        }
 
         if ($hasDefectRemedySources) {
             $lines[] = '5. DEFECT REMEDY RULE: თუ წყაროებში ნივთის/დაფარული ნაკლი უკავშირდება მოშლას, ნაკლის გამოსწორებას, ფასის შემცირებას ან ზიანს, საბოლოო დასკვნაში არ დაწერო "ბათილობა ნაკლის საფუძველზე". სწორი ფორმულაა: "ნაკლი → მოშლა/ფასის შემცირება/გამოსწორება/ზიანი"; ბათილობა განიხილე მხოლოდ დამოუკიდებელი საფუძვლით, მაგალითად მოტყუება ან სკ-ის 54-ე მუხლი.';
@@ -114,6 +127,7 @@ class LegalRemedyGuardService
 
         $lines[] = '';
         $lines[] = 'CHECK BEFORE FINAL ANSWER: თუ მომხმარებელი ითხოვს ბათილობას, მაგრამ წყარო მხოლოდ მოშლას/ფასის შემცირებას/ზიანს იძლევა, თქვი რომ ეს არის სხვა remedy და არა ბათილობა.';
+        $lines[] = 'CHECK PROCEDURAL BOUNDARIES: თუ deterministic rule atom ზღვრის ჩათვლას/გამორიცხვას გითვლის, დასკვნაში იგივე boundary გამოიყენე და არ შეცვალო.';
         $lines[] = '────────────────────────';
 
         return implode("\n", $lines);

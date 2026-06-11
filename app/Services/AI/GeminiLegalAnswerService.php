@@ -44,7 +44,7 @@ class GeminiLegalAnswerService implements AnswerServiceInterface
         array            $euResults = [],
         array            $germanResults = [],
         array            $constCourtResults = [],
-        array            $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'],
+        array            $sources = [],
         ?IssueList       $issueList = null,
     ): string {
         [$text] = $this->callGemini($userQuestion, $decisions, $historyMessages, $totalFound, $mode, $confidence, $lawResults);
@@ -66,7 +66,7 @@ class GeminiLegalAnswerService implements AnswerServiceInterface
         array            $euResults = [],
         array            $germanResults = [],
         array            $constCourtResults = [],
-        array            $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'],
+        array            $sources = [],
         ?IssueList       $issueList = null,
     ): \Generator {
         [$text] = $this->callGemini($userQuestion, $decisions, $historyMessages, $totalFound, $mode, $confidence, $lawResults);

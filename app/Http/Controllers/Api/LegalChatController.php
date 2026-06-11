@@ -104,7 +104,7 @@ class LegalChatController extends Controller
             $result = $this->orchestrator->handle(
                 chat:         $chat,
                 userQuestion: $request->input('message'),
-                sources:      $request->input('sources', ['court', 'matsne', 'echr', 'eu', 'german', 'const_court']),
+                sources:      $request->input('sources', config('openai.default_sources', ['court', 'matsne'])),
             );
 
             return response()->json([
@@ -163,7 +163,7 @@ class LegalChatController extends Controller
                 $ctx = $this->orchestrator->prepare(
                     chat:         $chat,
                     userQuestion: $request->input('message'),
-                    sources:      $request->input('sources', ['court', 'matsne', 'echr', 'eu', 'german', 'const_court']),
+                    sources:      $request->input('sources', config('openai.default_sources', ['court', 'matsne'])),
                 );
 
                 // ── Stage 2: stream LLM tokens ────────────────────────────────
@@ -195,7 +195,7 @@ class LegalChatController extends Controller
                 }
 
                 // ── Stage 3: persist & emit done immediately ──────────────────
-                $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText);
+                $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText, evalWillRun: true);
                 $finalText = $assistantMessage->content;
 
                 $emit('done', [
@@ -217,6 +217,8 @@ class LegalChatController extends Controller
                         'used_case_count'  => $assistantMessage->meta['used_case_count']  ?? 0,
                         'used_chunk_count' => $assistantMessage->meta['used_chunk_count'] ?? 0,
                         'pipeline_ms'      => $assistantMessage->meta['pipeline_ms']      ?? null,
+                        'eval_enabled'     => $assistantMessage->meta['eval_enabled']     ?? false,
+                        'eval_status'      => $assistantMessage->meta['eval_status']      ?? null,
                     ],
                 ]);
 
@@ -271,6 +273,8 @@ class LegalChatController extends Controller
                 'used_case_count'  => $message->meta['used_case_count']  ?? 0,
                 'used_chunk_count' => $message->meta['used_chunk_count'] ?? 0,
                 'pipeline_ms'      => $message->meta['pipeline_ms']      ?? null,
+                'eval_enabled'     => $message->meta['eval_enabled']     ?? false,
+                'eval_status'      => $message->meta['eval_status']      ?? null,
             ],
             'created_at' => $message->created_at?->toISOString(),
         ];

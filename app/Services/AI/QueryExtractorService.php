@@ -13,7 +13,10 @@ class QueryExtractorService
     private string $model;
     private string $baseUrl;
 
-    public function __construct(private readonly LegalGlossaryService $glossary)
+    public function __construct(
+        private readonly LegalGlossaryService $glossary,
+        private readonly LegalQueryNormalizerService $normalizer,
+    )
     {
         $this->apiKey  = config('openai.api_key');
         // Intentionally uses extraction_model (mini) — simple keyword task, gpt-4.1 is overkill
@@ -104,7 +107,7 @@ PROMPT,
             $domain = $parsed['domain'] ?? null;
 
             if (empty($query)) {
-                return ['query' => $userMessage, 'domain' => null];
+                return $this->fallbackExtraction($userMessage);
             }
 
             // Validate domain
@@ -119,7 +122,7 @@ PROMPT,
                     'domain' => $domain,
                 ]);
 
-                return ['query' => $userMessage, 'domain' => null];
+                return $this->fallbackExtraction($userMessage);
             }
 
             // Expand with glossary synonyms
@@ -129,19 +132,39 @@ PROMPT,
                 Log::debug('QueryExtractor: glossary expansion', ['added' => $synonyms]);
             }
 
+            $normalization = $this->normalizer->normalize($userMessage, $query);
+            $query = $normalization['query'];
+
             Log::debug('QueryExtractor', [
                 'original' => $userMessage,
                 'query'    => $query,
                 'domain'   => $domain,
+                'normalization' => [
+                    'changed' => $normalization['changed'],
+                    'added_terms' => $normalization['added_terms'],
+                    'rule_triggers' => $normalization['rule_triggers'],
+                    'outcome_categories' => $normalization['outcome_categories'],
+                ],
             ]);
 
-            return ['query' => $query, 'domain' => $domain];
+            return ['query' => $query, 'domain' => $domain, 'normalization' => $normalization];
 
         } catch (\Throwable $e) {
             Log::warning('QueryExtractor failed, using original: ' . $e->getMessage());
         }
 
-        return ['query' => $userMessage, 'domain' => null];
+        return $this->fallbackExtraction($userMessage);
+    }
+
+    private function fallbackExtraction(string $userMessage): array
+    {
+        $normalization = $this->normalizer->normalize($userMessage, $userMessage);
+
+        return [
+            'query' => $normalization['query'],
+            'domain' => null,
+            'normalization' => $normalization,
+        ];
     }
 
     private function isClearlyUnrelatedExtraction(string $original, string $query, ?string $domain): bool

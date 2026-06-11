@@ -18,6 +18,11 @@ class LegalBenchmarkScorerTest extends TestCase
                     ['matsne_id' => 1155567, 'articles' => [47, 48]],
                 ],
                 'case_ids' => [101],
+                'rule_triggers' => ['labor.termination_notice'],
+                'outcome_categories' => ['substantive_outcome.labor_termination'],
+                'facts' => [
+                    ['key' => 'notice_deadline', 'value' => 30, 'unit' => 'day'],
+                ],
                 'forbidden_matsne_ids' => [29962],
             ],
         ], [
@@ -28,6 +33,11 @@ class LegalBenchmarkScorerTest extends TestCase
             ],
             'case_ids' => [101, 202],
             'echr' => [],
+            'rule_triggers' => ['labor.termination_notice'],
+            'outcome_categories' => ['substantive_outcome.labor_termination'],
+            'facts' => [
+                ['key' => 'notice_deadline', 'value' => 30, 'unit' => 'day'],
+            ],
         ]);
 
         $this->assertFalse($score['passed']);
@@ -35,6 +45,9 @@ class LegalBenchmarkScorerTest extends TestCase
         $this->assertSame(1, $score['law']['matched']);
         $this->assertSame(2, $score['articles']['matched']);
         $this->assertSame(1, $score['cases']['matched']);
+        $this->assertSame(1, $score['rule_triggers']['matched']);
+        $this->assertSame(1, $score['outcome_categories']['matched']);
+        $this->assertSame(1, $score['facts']['matched']);
     }
 
     public function test_it_summarizes_scores(): void
@@ -47,6 +60,10 @@ class LegalBenchmarkScorerTest extends TestCase
                 'articles' => ['matched' => 2, 'total' => 2],
                 'cases' => ['matched' => 0, 'total' => 0],
                 'echr' => ['matched' => 0, 'total' => 0],
+                'rule_triggers' => ['matched' => 1, 'total' => 1],
+                'outcome_categories' => ['matched' => 0, 'total' => 0],
+                'outcomes' => ['matched' => 0, 'total' => 0],
+                'facts' => ['matched' => 1, 'total' => 1],
                 'forbidden_hits' => [],
             ],
             [
@@ -55,6 +72,10 @@ class LegalBenchmarkScorerTest extends TestCase
                 'articles' => ['matched' => 1, 'total' => 2],
                 'cases' => ['matched' => 0, 'total' => 0],
                 'echr' => ['matched' => 0, 'total' => 0],
+                'rule_triggers' => ['matched' => 0, 'total' => 1],
+                'outcome_categories' => ['matched' => 0, 'total' => 0],
+                'outcomes' => ['matched' => 0, 'total' => 0],
+                'facts' => ['matched' => 0, 'total' => 1],
                 'forbidden_hits' => ['law:29962'],
             ],
         ];
@@ -65,6 +86,8 @@ class LegalBenchmarkScorerTest extends TestCase
         $this->assertSame(1, $summary['passed']);
         $this->assertSame(0.5, $summary['law']['rate']);
         $this->assertSame(0.75, $summary['articles']['rate']);
+        $this->assertSame(0.5, $summary['rule_triggers']['rate']);
+        $this->assertSame(0.5, $summary['facts']['rate']);
         $this->assertSame(1, $summary['forbidden_hit_count']);
     }
 }

@@ -4,12 +4,14 @@ namespace App\Services\AI;
 
 class AnswerValidatorService
 {
+    private LegalConsequenceTaxonomyService $consequenceTaxonomy;
+
     private const ARTICLE_PATTERNS = [
         '/მუხლ(?:ი|ის|ით|ზე|ში|იდან|ად|ებს|ები)?\s*№?\s*(\d{1,4})(?:\.\d+)?(?!\s*(?:[-–]\s*)?(?:ე|ლი)?\s*(?:ნაწილ|პუნქტ|ქვეპუნქტ))/u',
         '/(\d{1,4})(?:-?ე|ე)?\s+მუხლ(?:ი|ის|ით|ზე|ში|იდან|ად|ებს|ები)?/u',
     ];
 
-    private const LEGAL_NUMBER_PATTERN = '/(?<![\p{L}\p{N}])(\d+(?:[.,]\d+)?)\s*(?:[-–]\s*)?(დღ(?:ე|ის|ით|იდან|ეში|ეებს|იანი|იან)?|თვ(?:ე|ის|ით|ეში|იანი|იან)?|წელ(?:ი|ს|ით|ში|იწად|იწადი|იანი|იან)?|წლ(?:ის|ით|ამდე|იანი|იან)?|ლარ(?:ი|ის|ით)?|₾|%|პროცენტ(?:ი|ის|ით)?|კალენდარულ(?:ი|ად)?|სამუშაო|საათ(?:ი|ის|ში)?|კვირ(?:ა|ის|აში)?)/u';
+    private const LEGAL_NUMBER_PATTERN = '/(?<![\p{L}\p{N}])((?:\d{1,3}(?:(?:\s|\x{00A0})\d{3})+)|(?:\d+(?:[.,]\d+)?))\s*(?:[-–]\s*)?(დღ(?:ე|ის|ით|იდან|ეში|ეებს|იანი|იან)?|თვ(?:ე|ის|ით|ეში|იანი|იან)?|წელ(?:ი|ს|ით|ში|იწად|იწადი|იანი|იან)?|წლ(?:ის|ით|ამდე|იანი|იან)?|ლარ(?:ი|ის|ით)?|₾|%|პროცენტ(?:ი|ის|ით)?|კალენდარულ(?:ი|ად)?|სამუშაო|საათ(?:ი|ის|ში)?|კვირ(?:ა|ის|აში)?)/u';
 
     private const DOMESTIC_CASE_LAW_PHRASES = [
         'უზენაესი სასამართლ',
@@ -50,6 +52,11 @@ class AnswerValidatorService
         'notice_or_preclusion' => ['პრეტენზ', 'აცნობ', 'ეცნობ', 'ერთმევა'],
         'limitation' => ['ხანდაზმულ', 'ვადა'],
     ];
+
+    public function __construct(?LegalConsequenceTaxonomyService $consequenceTaxonomy = null)
+    {
+        $this->consequenceTaxonomy = $consequenceTaxonomy ?? new LegalConsequenceTaxonomyService();
+    }
 
     /**
      * @param array<int, array<string, mixed>> $decisions
@@ -108,6 +115,10 @@ class AnswerValidatorService
             $flags[] = $remedyFlag;
         }
 
+        foreach ($this->detectProceduralConsequenceClaims($answerText) as $proceduralFlag) {
+            $flags[] = $proceduralFlag;
+        }
+
         $score = $this->score($flags);
         $verdict = $this->verdict($flags, $score);
 
@@ -126,6 +137,7 @@ class AnswerValidatorService
                 'overstated_weak_case_law_claims' => count(array_filter($flags, fn (array $f) => $f['type'] === 'overstated_weak_case_law_claim')),
                 'weak_case_authority_claims' => count(array_filter($flags, fn (array $f) => $f['type'] === 'weak_case_authority_claim')),
                 'remedy_mismatch_claims' => count(array_filter($flags, fn (array $f) => in_array($f['type'], ['unsupported_legal_remedy', 'defect_nullity_conflation', 'defect_notice_as_challenge_period'], true))),
+                'procedural_mismatch_claims' => count(array_filter($flags, fn (array $f) => in_array($f['type'], ['wrong_threshold_boundary', 'contradictory_boundary_application'], true))),
             ],
             'checked' => [
                 'answer_articles' => $answerArticles,
@@ -134,6 +146,7 @@ class AnswerValidatorService
                 'source_legal_numbers' => $sourceNumbers,
                 'answer_remedies' => $this->detectOutcomeCategories($answerText),
                 'source_remedies' => $this->detectSourceOutcomeCategories($decisions, $matsneResults, $echrResults, $extractedRules),
+                'procedural_boundary_findings' => $this->consequenceTaxonomy->boundaryFindings($answerText),
             ],
         ];
     }
@@ -431,6 +444,14 @@ class AnswerValidatorService
     }
 
     /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectProceduralConsequenceClaims(string $answerText): array
+    {
+        return $this->consequenceTaxonomy->boundaryFindings($answerText);
+    }
+
+    /**
      * @return array<int, string>
      */
     private function detectOutcomeCategories(string $text): array
@@ -677,6 +698,7 @@ class AnswerValidatorService
 
     private function normalizeNumber(string $value): string
     {
+        $value = preg_replace('/(?:\s|\x{00A0})+/u', '', $value) ?? $value;
         $normalized = str_replace(',', '.', $value);
 
         if (str_contains($normalized, '.')) {

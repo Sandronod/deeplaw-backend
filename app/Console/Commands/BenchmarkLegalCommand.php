@@ -64,6 +64,8 @@ class BenchmarkLegalCommand extends Command
                 $this->fmtMetric($score['articles'] ?? []),
                 $this->fmtMetric($score['cases'] ?? []),
                 $this->fmtMetric($score['echr'] ?? []),
+                $this->fmtMetric($score['rule_triggers'] ?? []),
+                $this->fmtMetric($score['facts'] ?? []),
                 implode(', ', $score['forbidden_hits'] ?? []),
             ];
 
@@ -79,7 +81,7 @@ class BenchmarkLegalCommand extends Command
         if ($this->option('details')) {
             $this->newLine();
             $this->table(
-                ['ID', 'Status', 'Law@k', 'Article@k', 'Case@k', 'ECHR@k', 'Forbidden'],
+                ['ID', 'Status', 'Law@k', 'Article@k', 'Case@k', 'ECHR@k', 'Rules', 'Facts', 'Forbidden'],
                 $rows
             );
         }
@@ -121,6 +123,10 @@ class BenchmarkLegalCommand extends Command
                 'articles' => ['matched' => 0, 'total' => 0, 'rate' => null],
                 'cases' => ['matched' => 0, 'total' => 0, 'rate' => null],
                 'echr' => ['matched' => 0, 'total' => 0, 'rate' => null],
+                'rule_triggers' => ['matched' => 0, 'total' => 0, 'rate' => null],
+                'outcome_categories' => ['matched' => 0, 'total' => 0, 'rate' => null],
+                'outcomes' => ['matched' => 0, 'total' => 0, 'rate' => null],
+                'facts' => ['matched' => 0, 'total' => 0, 'rate' => null],
                 'forbidden_hits' => [],
                 'missing' => [],
                 'actual' => [],
@@ -136,6 +142,7 @@ class BenchmarkLegalCommand extends Command
 
     private function actualFromContext(array $ctx): array
     {
+        $normalization = $ctx['triageResult']->queryNormalization ?? [];
         $finalDecisionIds = array_values(array_filter(array_map(
             fn (array $decision) => isset($decision['case_id']) ? (int) $decision['case_id'] : null,
             $ctx['finalDecisions'] ?? []
@@ -150,6 +157,10 @@ class BenchmarkLegalCommand extends Command
                 fn ($result) => $this->normalizeEchrResult($result),
                 $ctx['echrResults'] ?? []
             ),
+            'rule_triggers' => $normalization['rule_triggers'] ?? [],
+            'outcome_categories' => $normalization['outcome_categories'] ?? [],
+            'outcomes' => $normalization['outcomes'] ?? [],
+            'facts' => $normalization['facts'] ?? [],
         ];
     }
 
@@ -219,6 +230,9 @@ class BenchmarkLegalCommand extends Command
                 ['Article hit@k', $this->fmtRate($summary['articles']['rate']), "{$summary['articles']['matched']} / {$summary['articles']['total']}"],
                 ['Case hit@k', $this->fmtRate($summary['cases']['rate']), "{$summary['cases']['matched']} / {$summary['cases']['total']}"],
                 ['ECHR hit@k', $this->fmtRate($summary['echr']['rate']), "{$summary['echr']['matched']} / {$summary['echr']['total']}"],
+                ['Rule trigger hit', $this->fmtRate($summary['rule_triggers']['rate']), "{$summary['rule_triggers']['matched']} / {$summary['rule_triggers']['total']}"],
+                ['Outcome category hit', $this->fmtRate($summary['outcome_categories']['rate']), "{$summary['outcome_categories']['matched']} / {$summary['outcome_categories']['total']}"],
+                ['Fact extraction hit', $this->fmtRate($summary['facts']['rate']), "{$summary['facts']['matched']} / {$summary['facts']['total']}"],
                 ['Forbidden hits', (string) $summary['forbidden_hit_count'], '-'],
             ]
         );

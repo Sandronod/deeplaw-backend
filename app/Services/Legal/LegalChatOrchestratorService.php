@@ -40,6 +40,8 @@ use Illuminate\Support\Facades\Log;
 
 class LegalChatOrchestratorService
 {
+    private const SUPPORTED_SOURCES = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court'];
+
     public function __construct(
         private readonly EmbedCacheService          $embedCache,
         private readonly LegalCaseRetrieverService  $retriever,
@@ -71,10 +73,21 @@ class LegalChatOrchestratorService
         private readonly LegalRuleExtractorService  $ruleExtractor,
     ) {}
 
+    private function normalizeSources(array $sources): array
+    {
+        $selected = $sources ?: (array) config('openai.default_sources', ['court', 'matsne']);
+        $selected = array_values(array_unique(array_filter(
+            array_map('strval', $selected),
+            fn (string $source) => in_array($source, self::SUPPORTED_SOURCES, true),
+        )));
+
+        return $selected ?: ['court', 'matsne'];
+    }
+
     /**
      * Full pipeline (non-streaming): prepare → answer → finalize.
      */
-    public function handle(Chat $chat, string $userQuestion, array $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court']): array
+    public function handle(Chat $chat, string $userQuestion, array $sources = []): array
     {
         $ctx = $this->prepare($chat, $userQuestion, $sources);
 
@@ -111,8 +124,10 @@ class LegalChatOrchestratorService
      * Runs all pipeline steps up to (but not including) the LLM answer call.
      * Returns a context array that can be passed to finalize() after streaming.
      */
-    public function prepare(Chat $chat, string $userQuestion, array $sources = ['court', 'matsne', 'echr', 'eu', 'german', 'const_court']): array
+    public function prepare(Chat $chat, string $userQuestion, array $sources = []): array
     {
+        $sources = $this->normalizeSources($sources);
+
         $startTime = microtime(true);
         $timings = [];
 
@@ -470,7 +485,7 @@ class LegalChatOrchestratorService
     /**
      * Saves the assistant message to the DB after the answer text is known.
      */
-    public function finalize(Chat $chat, array $ctx, string $answerText): ChatMessage
+    public function finalize(Chat $chat, array $ctx, string $answerText, bool $evalWillRun = false): ChatMessage
     {
         $finalizeStartedAt = microtime(true);
         $timings = $ctx['timings_ms'] ?? [];
@@ -487,6 +502,39 @@ class LegalChatOrchestratorService
         $euCitations         = $this->buildEuCitations($ctx['euResults']             ?? []);
         $germanCitations     = $this->buildGermanCitations($ctx['germanResults']     ?? []);
         $constCourtCitations = $this->buildConstCourtCitations($ctx['constCourtResults'] ?? []);
+
+        $visibleSourceBudget = $this->visibleSourceBudget($ctx);
+        $sourceCounts = [
+            'domestic_cases' => count($citations),
+            'echr_cases'     => count($echrCitations),
+            'matsne_docs'    => count($matsneCitations),
+            'eu_docs'        => count($euCitations),
+            'german_cases'   => count($germanCitations),
+            'const_court'    => count($constCourtCitations),
+        ];
+        $citationGroups = $this->capCitationGroups([
+            'matsne_docs'    => $matsneCitations,
+            'domestic_cases' => $citations,
+            'echr_cases'     => $echrCitations,
+            'const_court'    => $constCourtCitations,
+            'eu_docs'        => $euCitations,
+            'german_cases'   => $germanCitations,
+        ], $visibleSourceBudget);
+
+        $matsneCitations     = $citationGroups['matsne_docs'];
+        $citations           = $citationGroups['domestic_cases'];
+        $echrCitations       = $citationGroups['echr_cases'];
+        $constCourtCitations = $citationGroups['const_court'];
+        $euCitations         = $citationGroups['eu_docs'];
+        $germanCitations     = $citationGroups['german_cases'];
+        $hiddenSourceCounts = [
+            'domestic_cases' => max(0, $sourceCounts['domestic_cases'] - count($citations)),
+            'echr_cases'     => max(0, $sourceCounts['echr_cases'] - count($echrCitations)),
+            'matsne_docs'    => max(0, $sourceCounts['matsne_docs'] - count($matsneCitations)),
+            'eu_docs'        => max(0, $sourceCounts['eu_docs'] - count($euCitations)),
+            'german_cases'   => max(0, $sourceCounts['german_cases'] - count($germanCitations)),
+            'const_court'    => max(0, $sourceCounts['const_court'] - count($constCourtCitations)),
+        ];
         $timings['citation_build'] = $this->elapsedMs($stageStartedAt);
 
         $stageStartedAt = microtime(true);
@@ -523,6 +571,7 @@ class LegalChatOrchestratorService
         if ($overallConfidence === 'none' && ($matsneConfidence === 'high' || $echrConfidence === 'high')) {
             $overallConfidence = 'medium';
         }
+        $evalEnabled = (bool) config('openai.judge_enabled', false) && ($ctx['mode'] ?? 'explain') !== 'chat';
         $timings['finalize_before_save'] = $this->elapsedMs($finalizeStartedAt);
 
         return ChatMessage::create([
@@ -538,6 +587,11 @@ class LegalChatOrchestratorService
                     'eu_docs'        => $euCitations,
                     'german_cases'   => $germanCitations,
                     'const_court'    => $constCourtCitations,
+                ],
+                'source_budget' => [
+                    'visible_limit' => $visibleSourceBudget,
+                    'total_counts'  => $sourceCounts,
+                    'hidden_counts' => $hiddenSourceCounts,
                 ],
 
                 // ── Confidence breakdown ──────────────────────────────────────
@@ -609,6 +663,8 @@ class LegalChatOrchestratorService
 
                 // ── LLM-as-Judge evaluation (filled later via runEval) ───────
                 'eval' => null,
+                'eval_enabled' => $evalEnabled,
+                'eval_status' => $evalEnabled ? ($evalWillRun ? 'pending' : 'not_requested') : 'disabled',
             ],
         ]);
     }
@@ -620,6 +676,7 @@ class LegalChatOrchestratorService
     public function runEval(ChatMessage $message, array $ctx, string $answerText): ?array
     {
         if (!config('openai.judge_enabled', false) || ($ctx['mode'] ?? 'explain') === 'chat') {
+            $this->updateEvalMeta($message, 'disabled');
             return null;
         }
 
@@ -644,14 +701,30 @@ class LegalChatOrchestratorService
 
             $meta         = $message->meta ?? [];
             $meta['eval'] = $evalResult;
+            $meta['eval_status'] = 'completed';
+            $meta['eval_completed_at'] = now()->toISOString();
             $message->update(['meta' => $meta]);
 
             return $evalResult;
 
         } catch (\Throwable $e) {
             Log::warning('EvalJudge: skipped — ' . $e->getMessage());
+            $this->updateEvalMeta($message, 'skipped', $e->getMessage());
             return null;
         }
+    }
+
+    private function updateEvalMeta(ChatMessage $message, string $status, ?string $error = null): void
+    {
+        $meta = $message->meta ?? [];
+        $meta['eval_status'] = $status;
+        $meta['eval_enabled'] = $status !== 'disabled';
+
+        if ($error !== null) {
+            $meta['eval_error'] = mb_substr($error, 0, 300);
+        }
+
+        $message->update(['meta' => $meta]);
     }
 
     // ── Issue coverage tracking ───────────────────────────────────────────────
@@ -987,6 +1060,7 @@ class LegalChatOrchestratorService
             'query_complexity_level' => $triage->complexityLevel,
             'query_complexity_score' => $triage->complexityScore,
             'query_complexity_reasons' => $triage->complexityReasons,
+            'query_normalization' => $triage->queryNormalization,
             'extracted_query_discarded' => false,
         ];
 
@@ -1163,6 +1237,51 @@ class LegalChatOrchestratorService
     private function elapsedMs(float $startedAt): int
     {
         return (int) round((microtime(true) - $startedAt) * 1000);
+    }
+
+    private function visibleSourceBudget(array $ctx): int
+    {
+        $mode = (string) ($ctx['mode'] ?? 'explain');
+        $level = (string) ($ctx['triageResult']->complexityLevel ?? 'normal');
+        $isComplex = in_array($mode, ['advocate', 'compare', 'summarize', 'find'], true)
+            || in_array($level, ['complex', 'full'], true);
+
+        $configKey = $isComplex ? 'openai.max_visible_sources_complex' : 'openai.max_visible_sources_default';
+
+        return max(1, (int) config($configKey, $isComplex ? 8 : 5));
+    }
+
+    /**
+     * @param array<string, array<int, array<string, mixed>>> $groups
+     * @return array<string, array<int, array<string, mixed>>>
+     */
+    private function capCitationGroups(array $groups, int $budget): array
+    {
+        $order = ['matsne_docs', 'domestic_cases', 'echr_cases', 'const_court', 'eu_docs', 'german_cases'];
+        $perGroupMax = [
+            'matsne_docs'    => 3,
+            'domestic_cases' => 3,
+            'echr_cases'     => 2,
+            'const_court'    => 2,
+            'eu_docs'        => 1,
+            'german_cases'   => 1,
+        ];
+
+        $remaining = max(1, $budget);
+        $capped = array_fill_keys($order, []);
+
+        foreach ($order as $key) {
+            $items = array_values($groups[$key] ?? []);
+            $take = min(count($items), $perGroupMax[$key], $remaining);
+            $capped[$key] = array_slice($items, 0, $take);
+            $remaining -= $take;
+
+            if ($remaining <= 0) {
+                break;
+            }
+        }
+
+        return $capped;
     }
 
     private function normalizedEmbeddingText(string $text): string
