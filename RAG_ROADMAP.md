@@ -1,10 +1,39 @@
 # RAG / Legal QA Roadmap
 
-Last updated: 2026-06-10
+Last updated: 2026-06-11
 
 This note is the handoff context for continuing work on the Georgian Legal AI Chat project in a new session.
 
 Current focus: legal question answering, source retrieval, norm retrieval, court decision matching, answer grounding, evaluator quality, and latency. Security, chat ownership, and account/permission topics are intentionally out of scope for this phase.
+
+## Current Status - 2026-06-11
+
+The immediate focus has moved from one-off prompt fixes to reusable quality controls.
+
+Implemented today:
+
+- Rule atom prompt guidance is now registry-driven:
+  - `summary_lines` and `prompt_guard_lines` live in `config/legal_consequence_rules.php`.
+  - `OpenAILegalAnswerService` no longer hardcodes the magistrate/Article 365 guard.
+  - Procedural prompt guidance is selected by matching rule atom triggers and category.
+- Civil procedure atoms now cover:
+  - magistrate claim value boundary (`claim_value <= 50000`, equal included)
+  - counterclaim subject-matter jurisdiction guard
+  - counterclaim preparatory-stage guard
+- Added a deterministic answer correction gate:
+  - first generated answer is post-processed and validated
+  - if validator returns `fail` or any `high` flag, the system makes one correction retry
+  - retry uses the same retrieved sources and a focused correction prompt
+  - final DB meta includes `answer_correction`
+  - SSE `done.content` returns the final corrected content, so the frontend replaces streamed draft text
+- LLM-as-Judge remains async/optional and is not used as a blocking production gate.
+
+Still not implemented:
+
+- automatic candidate atom generation from failed answers
+- clustering repeated failures into an atom backlog
+- human approval workflow for draft atoms
+- DB-backed/versioned rule atom registry
 
 ## Where We Are
 
@@ -140,16 +169,16 @@ Recommendation:
 
 ## Tests / Verification
 
-Latest verified commands:
+Latest verified commands (2026-06-11):
 
 ```powershell
-& 'C:\Users\NODO\.config\herd\bin\php84\php.exe' artisan test --testsuite=Unit
+& 'C:\Users\NODO\.config\herd\bin\php84.bat' artisan test --testsuite=Unit
 ```
 
 Result:
 
 ```text
-82 passed (349 assertions)
+99 passed (443 assertions)
 ```
 
 Frontend:
@@ -161,10 +190,8 @@ npm run build
 Result: build passed. Existing Angular warning remains:
 
 ```text
-NG8107 optional chain warning in message-item.component.ts
+Application bundle generation complete.
 ```
-
-This warning is not related to the RAG/legal QA changes.
 
 ## Production Notes
 

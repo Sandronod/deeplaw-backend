@@ -194,6 +194,12 @@ class LegalChatController extends Controller
                     $emit('token', ['token' => $token]);
                 }
 
+                $correctionStartedAt = microtime(true);
+                $correctionResult = $this->orchestrator->applyValidationCorrectionGate($ctx, $fullText);
+                $fullText = $correctionResult['text'];
+                $ctx['answer_correction'] = $correctionResult['meta'];
+                $ctx['timings_ms']['answer_correction_gate'] = (int) ((microtime(true) - $correctionStartedAt) * 1000);
+
                 // ── Stage 3: persist & emit done immediately ──────────────────
                 $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText, evalWillRun: true);
                 $finalText = $assistantMessage->content;
@@ -219,6 +225,7 @@ class LegalChatController extends Controller
                         'pipeline_ms'      => $assistantMessage->meta['pipeline_ms']      ?? null,
                         'eval_enabled'     => $assistantMessage->meta['eval_enabled']     ?? false,
                         'eval_status'      => $assistantMessage->meta['eval_status']      ?? null,
+                        'answer_correction' => $assistantMessage->meta['answer_correction'] ?? null,
                     ],
                 ]);
 

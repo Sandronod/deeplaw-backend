@@ -92,25 +92,14 @@ class LegalChatOrchestratorService
         $ctx = $this->prepare($chat, $userQuestion, $sources);
 
         $answerStartedAt = microtime(true);
-        $answerText = $this->answerer->answer(
-            userQuestion:      $ctx['userQuestion'],
-            decisions:         $ctx['finalDecisions'],
-            historyMessages:   $ctx['history'],
-            totalFound:        $ctx['retrieval']->totalMetaFound,
-            mode:              $ctx['mode'],
-            confidence:        $ctx['confidence'],
-            lawResults:        [],
-            echrResults:       $ctx['echrResults'],
-            matsneResults:     $ctx['matsneResults']     ?? [],
-            euResults:         $ctx['euResults']         ?? [],
-            germanResults:     $ctx['germanResults']     ?? [],
-            constCourtResults: $ctx['constCourtResults'] ?? [],
-            sources:           $ctx['sources'],
-            issueList:         $ctx['issueList'],
-            triage:            $ctx['triageResult'],
-            extractedRules:    $ctx['extractedRules']    ?? [],
-        );
+        $answerText = $this->generateAnswer($ctx);
         $ctx['timings_ms']['answer_generation'] = $this->elapsedMs($answerStartedAt);
+
+        $correctionStartedAt = microtime(true);
+        $correctionResult = $this->applyValidationCorrectionGate($ctx, $answerText);
+        $answerText = $correctionResult['text'];
+        $ctx['answer_correction'] = $correctionResult['meta'];
+        $ctx['timings_ms']['answer_correction_gate'] = $this->elapsedMs($correctionStartedAt);
 
         $assistantMessage = $this->finalize($chat, $ctx, $answerText);
 
@@ -487,6 +476,232 @@ class LegalChatOrchestratorService
     }
 
     /**
+     * Deterministic validation gate with one retry. The LLM judge remains async;
+     * this gate only uses cheap validator flags that are already available.
+     *
+     * @return array{text: string, meta: array<string, mixed>}
+     */
+    public function applyValidationCorrectionGate(array $ctx, string $answerText): array
+    {
+        $enabled = (bool) config('openai.answer_correction_enabled', true);
+        $meta = [
+            'enabled' => $enabled,
+            'attempted' => false,
+            'corrected' => false,
+            'status' => $enabled ? 'not_needed' : 'disabled',
+        ];
+
+        if (!$enabled || ($ctx['mode'] ?? 'explain') === 'chat') {
+            return ['text' => $answerText, 'meta' => $meta];
+        }
+
+        $postProcessResult = $this->answerPostProcessor->process($answerText, $ctx);
+        $candidateText = $postProcessResult['text'];
+        $initialValidation = $this->validateAnswerForCorrectionGate($candidateText, $ctx);
+
+        $meta['initial_validation'] = $this->summarizeValidationForCorrection($initialValidation);
+        $meta['pre_retry_postprocess'] = [
+            'changed' => !empty($postProcessResult['changes']),
+            'changes' => $postProcessResult['changes'],
+        ];
+
+        if (!$this->hasHighRiskValidationFlags($initialValidation)) {
+            return ['text' => $candidateText, 'meta' => $meta];
+        }
+
+        $meta['attempted'] = true;
+        $meta['trigger_flags'] = $this->summarizeValidationFlags($initialValidation['flags'] ?? [], 4);
+
+        try {
+            $correctionQuestion = $this->buildCorrectionQuestion($ctx['userQuestion'], $initialValidation);
+            $correctionHistory = array_merge($ctx['history'] ?? [], [[
+                'role' => 'assistant',
+                'content' => mb_substr($candidateText, 0, 5000),
+            ]]);
+
+            $correctedText = $this->generateAnswer($ctx, $correctionQuestion, $correctionHistory);
+            $correctedPostProcessResult = $this->answerPostProcessor->process($correctedText, $ctx);
+            $correctedText = $correctedPostProcessResult['text'];
+            $retryValidation = $this->validateAnswerForCorrectionGate($correctedText, $ctx);
+
+            $meta['retry_validation'] = $this->summarizeValidationForCorrection($retryValidation);
+            $meta['retry_postprocess'] = [
+                'changed' => !empty($correctedPostProcessResult['changes']),
+                'changes' => $correctedPostProcessResult['changes'],
+            ];
+
+            if ($this->shouldUseCorrectedAnswer($initialValidation, $retryValidation)) {
+                $meta['corrected'] = trim($correctedText) !== trim($candidateText);
+                $meta['status'] = $this->hasHighRiskValidationFlags($retryValidation)
+                    ? 'unresolved_high_risk'
+                    : 'corrected';
+
+                return ['text' => $correctedText, 'meta' => $meta];
+            }
+
+            $meta['status'] = 'retry_not_improved';
+
+            return ['text' => $candidateText, 'meta' => $meta];
+        } catch (\Throwable $e) {
+            Log::warning('Answer correction gate failed', [
+                'error' => $e->getMessage(),
+                'mode' => $ctx['mode'] ?? null,
+            ]);
+
+            $meta['status'] = 'retry_failed';
+            $meta['error'] = mb_substr($e->getMessage(), 0, 300);
+
+            return ['text' => $candidateText, 'meta' => $meta];
+        }
+    }
+
+    private function generateAnswer(array $ctx, ?string $userQuestion = null, ?array $historyMessages = null): string
+    {
+        return $this->answerer->answer(
+            userQuestion:      $userQuestion ?? $ctx['userQuestion'],
+            decisions:         $ctx['finalDecisions'],
+            historyMessages:   $historyMessages ?? $ctx['history'],
+            totalFound:        $ctx['retrieval']->totalMetaFound,
+            mode:              $ctx['mode'],
+            confidence:        $ctx['confidence'],
+            lawResults:        [],
+            echrResults:       $ctx['echrResults'],
+            matsneResults:     $ctx['matsneResults']     ?? [],
+            euResults:         $ctx['euResults']         ?? [],
+            germanResults:     $ctx['germanResults']     ?? [],
+            constCourtResults: $ctx['constCourtResults'] ?? [],
+            sources:           $ctx['sources'],
+            issueList:         $ctx['issueList'],
+            triage:            $ctx['triageResult'],
+            extractedRules:    $ctx['extractedRules']    ?? [],
+        );
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function validateAnswerForCorrectionGate(string $answerText, array $ctx): array
+    {
+        return $this->answerValidator->validate(
+            answerText:     $answerText,
+            decisions:      $ctx['finalDecisions'],
+            matsneResults:  $ctx['matsneResults'] ?? [],
+            echrResults:    $ctx['echrResults'] ?? [],
+            extractedRules: $ctx['extractedRules'] ?? [],
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $validation
+     */
+    private function hasHighRiskValidationFlags(array $validation): bool
+    {
+        if (in_array($validation['verdict'] ?? null, ['fail', 'poor'], true)) {
+            return true;
+        }
+
+        foreach (($validation['flags'] ?? []) as $flag) {
+            if (($flag['severity'] ?? null) === 'high') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param array<string, mixed> $initialValidation
+     * @param array<string, mixed> $retryValidation
+     */
+    private function shouldUseCorrectedAnswer(array $initialValidation, array $retryValidation): bool
+    {
+        $initialHigh = (int) ($initialValidation['summary']['high_flags'] ?? 0);
+        $retryHigh = (int) ($retryValidation['summary']['high_flags'] ?? 0);
+
+        if ($retryHigh < $initialHigh) {
+            return true;
+        }
+
+        if ($retryHigh === 0) {
+            return true;
+        }
+
+        return (int) ($retryValidation['score'] ?? 0) >= (int) ($initialValidation['score'] ?? 0);
+    }
+
+    /**
+     * @param array<string, mixed> $validation
+     * @return array<string, mixed>
+     */
+    private function summarizeValidationForCorrection(array $validation): array
+    {
+        return [
+            'verdict' => $validation['verdict'] ?? null,
+            'score' => $validation['score'] ?? null,
+            'flags_count' => $validation['summary']['flags_count'] ?? 0,
+            'high_flags' => $validation['summary']['high_flags'] ?? 0,
+            'medium_flags' => $validation['summary']['medium_flags'] ?? 0,
+            'low_flags' => $validation['summary']['low_flags'] ?? 0,
+            'flags' => $this->summarizeValidationFlags($validation['flags'] ?? [], 4),
+        ];
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $flags
+     * @return array<int, array<string, string|null>>
+     */
+    private function summarizeValidationFlags(array $flags, int $limit = 4): array
+    {
+        return array_map(
+            fn (array $flag) => [
+                'type' => isset($flag['type']) ? (string) $flag['type'] : null,
+                'severity' => isset($flag['severity']) ? (string) $flag['severity'] : null,
+                'message' => isset($flag['message']) ? mb_substr((string) $flag['message'], 0, 260) : null,
+                'value' => isset($flag['value']) ? (string) $flag['value'] : null,
+                'snippet' => isset($flag['snippet']) ? mb_substr((string) $flag['snippet'], 0, 220) : null,
+            ],
+            array_slice($flags, 0, $limit),
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $validation
+     */
+    private function buildCorrectionQuestion(string $originalQuestion, array $validation): string
+    {
+        $flagLines = [];
+        foreach ($this->summarizeValidationFlags($validation['flags'] ?? [], 4) as $flag) {
+            $parts = array_filter([
+                $flag['type'] ?? null,
+                $flag['severity'] ?? null,
+                $flag['message'] ?? null,
+                $flag['snippet'] ?? null,
+            ]);
+
+            $flagLines[] = '- ' . implode(' | ', $parts);
+        }
+
+        $flagsBlock = $flagLines ? implode("\n", $flagLines) : '- high-risk validation issue';
+
+        return <<<PROMPT
+თავდაპირველი კითხვა:
+{$originalQuestion}
+
+გადაწერე საბოლოო პასუხი თავიდან, ქართულად, მოკლედ და წყაროებზე დაყრდნობით.
+
+წინა ვერსიაში ავტომატურმა სამართლებრივმა შემოწმებამ იპოვა მაღალი რისკის პრობლემები:
+{$flagsBlock}
+
+სავალდებულო წესები:
+- არ ახსენო validator, შემოწმება, წინა პასუხი ან ეს ინსტრუქცია.
+- არ მოიგონო მუხლი, ვადა, თანხა, საქმე ან სასამართლო პრაქტიკა.
+- თუ მუხლი/ვადა/თანხა წყაროებში არ ჩანს, თქვი რომ მოძიებული წყაროებით დადასტურებული არ არის.
+- თუ ზღვრული პირობაა, ზუსტად განმარტე შედის თუ არა ტოლი მნიშვნელობა ზღვარში.
+- საბოლოო პასუხი დაიწყე მოკლე დასკვნით.
+PROMPT;
+    }
+
+    /**
      * Saves the assistant message to the DB after the answer text is known.
      */
     public function finalize(Chat $chat, array $ctx, string $answerText, bool $evalWillRun = false): ChatMessage
@@ -663,6 +878,12 @@ class LegalChatOrchestratorService
                 'answer_postprocess' => [
                     'changed' => !empty($postProcessResult['changes']),
                     'changes' => $postProcessResult['changes'],
+                ],
+                'answer_correction' => $ctx['answer_correction'] ?? [
+                    'enabled' => (bool) config('openai.answer_correction_enabled', true),
+                    'attempted' => false,
+                    'corrected' => false,
+                    'status' => 'not_run',
                 ],
 
                 // ── LLM-as-Judge evaluation (filled later via runEval) ───────

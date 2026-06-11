@@ -12,6 +12,7 @@ return [
     // High-reasoning judge model for LLM-as-Judge evaluation
     'judge_model'       => env('OPENAI_JUDGE_MODEL', 'o4-mini'),
     'judge_enabled'     => (bool) env('EVAL_JUDGE_ENABLED', false),
+    'answer_correction_enabled' => (bool) env('ANSWER_CORRECTION_ENABLED', true),
     'timeout'           => (int) env('OPENAI_TIMEOUT', 60),
     'max_tokens'        => (int) env('OPENAI_MAX_TOKENS', 2200),
     'temperature'       => (float) env('OPENAI_TEMPERATURE', 0.2),
