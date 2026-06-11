@@ -132,7 +132,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         $issueSection       = ($issueList?->isComplex) ? $issueList->toPromptBlock() : '';
         $glossaryBlock      = $userQuestion ? $this->glossary->buildPromptBlock($userQuestion, 8) : '';
         $domainContext      = $this->buildDomainContextBlock($triage);
-        $statutoryRules     = $this->buildStatutoryRulesBlock($triage);
+        $statutoryRules     = $this->buildStatutoryRulesBlock($triage, $userQuestion);
         $responseBudget     = $this->buildResponseBudgetInstruction($mode, $triage);
 
         return <<<PROMPT
@@ -395,7 +395,7 @@ INST;
         return implode("\n", $lines);
     }
 
-    private function buildStatutoryRulesBlock(?TriageResult $triage): string
+    private function buildStatutoryRulesBlock(?TriageResult $triage, string $userQuestion = ''): string
     {
         if (!$triage || $triage->isChatOnly()) {
             return '';
@@ -406,29 +406,28 @@ INST;
         $domains  = $triage->domains ?? [];
         $caseType = $triage->caseType ?? '';
 
-        $hasCivilProc = in_array('civil_procedure', $domains) || $caseType === 'civil';
+        $hasCivilProc = in_array('civil_procedure', $domains, true)
+            || in_array('procedure', $domains, true)
+            || $caseType === 'civil';
         $hasCivilLaw  = in_array('civil_law', $domains)       || $caseType === 'civil';
         $hasCriminal  = in_array('criminal', $domains)        || $caseType === 'criminal';
         $hasAdmin     = in_array('administrative', $domains)  || $caseType === 'administrative';
         $hasLabor     = in_array('labor', $domains);
 
         if ($hasCivilProc) {
-            $magistrateLines = $this->consequenceTaxonomy->summaryLines('civil_procedure.magistrate_claim_value');
-            $magistrateSummary = implode("\n", array_map(fn (string $line) => "• {$line}", $magistrateLines));
-            if ($magistrateSummary === '') {
-                $magistrateSummary = '• მაგისტრატი მოსამართლე: საგნობრივი განსჯადობა განისაზღვრება მოქმედი საპროცესო ნორმით';
+            $proceduralGuidanceLines = $this->consequenceTaxonomy->promptGuidanceLinesForQuestion(
+                $userQuestion . "\n" . ($triage->searchQuery ?? ''),
+                $triage,
+                'procedural_outcome.',
+            );
+            $proceduralGuidance = implode("\n", array_map(fn (string $line) => "• {$line}", $proceduralGuidanceLines));
+            if ($proceduralGuidance === '') {
+                $proceduralGuidance = '• საპროცესო შედეგები განსაზღვრე მოქმედი საპროცესო ნორმით და მოძიებული წყაროებით.';
             }
 
             $rules[] = <<<RULES
 📋 სამოქალაქო საპროცესო სამართლი — ძირითადი ზღვრები (სსკ):
-{$magistrateSummary}
-• სსკ 21-ე მუხლი — განსჯადობაზე შეთანხმება:
-  ✅ ვრცელდება: ტერიტორიული განსჯადობა (სად განიხილოს)
-  ❌ არ ვრცელდება: საგნობრივი განსჯადობა (ვინ განიხილოს — მაგ. მაგ. მოს. vs რაიონული)
-  → შეგებებული სარჩელის შეტანა ≠ საგნობრივ განსჯადობაზე შეთანხმება
-• სსკ 22-ე მუხლი: განსჯადობის წესების დაცვით მიღებული საქმე — ბოლომდე იმ სასამართლოს მიერ
-• სააპ. გასაჩ. ვადა: გადაწყვ. მიღ. დღიდან 2 კვ. (სსკ 369)
-• საკას. გასაჩ. ვადა: სააპ. გადაწყვ-დან 1 თვე (სსკ 396)
+{$proceduralGuidance}
 RULES;
         }
 

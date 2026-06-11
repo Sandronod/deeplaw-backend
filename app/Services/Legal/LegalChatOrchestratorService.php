@@ -267,8 +267,12 @@ class LegalChatOrchestratorService
                 // ── Article detector first — no Ollama needed (direct LIKE query) ─
                 try {
                     $sourceStartedAt = microtime(true);
-                    $matsneResults = $this->articleDetector->detect(
+                    $articleDetectorQuery = trim(implode("\n", array_filter([
                         $userQuestion,
+                        (string) $triageResult->searchQuery,
+                    ])));
+                    $matsneResults = $this->articleDetector->detect(
+                        $articleDetectorQuery,
                         $lawDomains,
                         $triageResult->temporalYear ?? (int) date('Y'),
                     );

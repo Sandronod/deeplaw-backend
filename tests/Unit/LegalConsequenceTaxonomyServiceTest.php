@@ -50,6 +50,51 @@ class LegalConsequenceTaxonomyServiceTest extends TestCase
         $this->assertSame(['ზღვარი არის 125 000 (ტესტი 2)'], $service->summaryLines('example.summary'));
     }
 
+    public function test_prompt_guidance_lines_include_registry_guards(): void
+    {
+        $service = new LegalConsequenceTaxonomyService([
+            'example.guidance' => [
+                'article' => 'Test Article 3',
+                'threshold' => 50000,
+                'summary_lines' => [
+                    'Limit is {threshold} ({article})',
+                ],
+                'prompt_guard_lines' => [
+                    'Do not confuse {article} with another rule.',
+                ],
+            ],
+        ]);
+
+        $this->assertSame([
+            'Limit is 50 000 (Test Article 3)',
+            'Do not confuse Test Article 3 with another rule.',
+        ], $service->promptGuidanceLines('example.guidance'));
+    }
+
+    public function test_prompt_guidance_lines_for_question_match_triggers_and_category(): void
+    {
+        $service = new LegalConsequenceTaxonomyService([
+            'example.procedure' => [
+                'article' => 'Procedure Article',
+                'category' => 'procedural_outcome.example',
+                'trigger_any_keywords' => ['counterclaim'],
+                'summary_lines' => ['Use {article}.'],
+                'prompt_guard_lines' => ['Keep the procedure frame.'],
+            ],
+            'example.substantive' => [
+                'article' => 'Substantive Article',
+                'category' => 'substantive_outcome.example',
+                'trigger_any_keywords' => ['counterclaim'],
+                'summary_lines' => ['Do not include this line.'],
+            ],
+        ]);
+
+        $this->assertSame([
+            'Use Procedure Article.',
+            'Keep the procedure frame.',
+        ], $service->promptGuidanceLinesForQuestion('Can the counterclaim proceed?', null, 'procedural_outcome.'));
+    }
+
     public function test_default_registry_detects_counterclaim_preparatory_stage_guard(): void
     {
         $service = new LegalConsequenceTaxonomyService();

@@ -110,10 +110,55 @@ class LegalConsequenceTaxonomyService
             return [];
         }
 
+        return $this->configuredLines($rule, 'summary_lines');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function promptGuidanceLines(string $ruleKey): array
+    {
+        $rule = $this->ruleAtoms[$ruleKey] ?? null;
+        if (!is_array($rule)) {
+            return [];
+        }
+
+        return array_merge(
+            $this->configuredLines($rule, 'summary_lines'),
+            $this->configuredLines($rule, 'prompt_guard_lines'),
+        );
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function promptGuidanceLinesForQuestion(
+        string $question,
+        ?TriageResult $triage = null,
+        ?string $categoryPrefix = null,
+    ): array {
+        $lowerQuestion = mb_strtolower($question);
         $lines = [];
-        foreach (($rule['summary_lines'] ?? []) as $line) {
-            if (is_string($line) && $line !== '') {
-                $lines[] = $this->renderTemplate($line, $rule);
+        $seen = [];
+
+        foreach ($this->ruleAtoms as $key => $rule) {
+            if ($categoryPrefix !== null
+                && !str_starts_with((string) ($rule['category'] ?? ''), $categoryPrefix)
+            ) {
+                continue;
+            }
+
+            if (!$this->questionMatchesRule($lowerQuestion, $rule, $triage)) {
+                continue;
+            }
+
+            foreach ($this->promptGuidanceLines($key) as $line) {
+                if (isset($seen[$line])) {
+                    continue;
+                }
+
+                $lines[] = $line;
+                $seen[$line] = true;
             }
         }
 
@@ -303,6 +348,23 @@ class LegalConsequenceTaxonomyService
         }
 
         return $this->renderTemplate($template, $rule, ['value' => $value]);
+    }
+
+    /**
+     * @param array<string, mixed> $rule
+     * @return array<int, string>
+     */
+    private function configuredLines(array $rule, string $key): array
+    {
+        $lines = [];
+
+        foreach (($rule[$key] ?? []) as $line) {
+            if (is_string($line) && $line !== '') {
+                $lines[] = $this->renderTemplate($line, $rule);
+            }
+        }
+
+        return $lines;
     }
 
     /**
