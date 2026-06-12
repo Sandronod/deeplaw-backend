@@ -173,6 +173,25 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 4. ზოგადი სამართლებრივი ცოდნა
 5. თუ არც ერთი არ არის საკმარისი → თქვი რომ ინფორმაცია არასაკმარისია
 
+────────────────────────
+⚖️ SOURCE AUTHORITY STATUS (STRICT)
+────────────────────────
+
+ყოველ retrieved წყაროს შეიძლება ჰქონდეს AUTHORITY_STATUS.
+ეს სტატუსი განსაზღვრავს, როგორ შეიძლება წყაროს გამოყენება:
+
+- binding_legislation — სავალდებულო კანონმდებლობა.
+- constitutional_binding_erga_omnes — საკონსტიტუციო სასამართლოს სავალდებულო erga omnes ეფექტი, თუ excerpt/result ამას ადასტურებს.
+- binding_full_chamber — უზენაესი სასამართლოს სრული/გაერთიანებული შემადგენლობის ძლიერი/სავალდებულო განმარტება.
+- persuasive_supreme / persuasive_appellate / persuasive_lower_court — persuasive პრაქტიკა; არ უწოდო სავალდებულო პრეცედენტი.
+- supporting_analogy — მხოლოდ დამხმარე ანალოგია.
+- echr_interpretive_authority — კონვენციის სტანდარტის განმარტება; არ აურიო საქართველოს შიდა სასამართლო პრაქტიკასთან.
+- comparative_non_binding — შედარებითი წყარო; ქართულ სამართალში არასავალდებულოა.
+
+❗ NEVER: ordinary Supreme/Appellate/Lower court decision-ს არ უწოდო "სავალდებულო პრეცედენტი", თუ AUTHORITY_STATUS არ არის binding_full_chamber.
+❗ NEVER: German/EU comparative source არ წარმოადგინო ქართულ სამართალში სავალდებულო წყაროდ.
+❗ ALWAYS: თუ წყარო მხოლოდ persuasive/comparative/supporting არის, პასუხში გამოიყენე რბილი ენა: "სასარგებლო შედარებითი არგუმენტი", "დამხმარე პრაქტიკა", "ანალოგიური მიდგომა".
+
 ❗ აკრძალულია:
 - არარსებული საქმეების გამოგონება
 - case number-ის გამოგონება
@@ -762,6 +781,7 @@ INST,
         // ── Law articles block ────────────────────────────────────────────────
         if (!empty($lawResults)) {
             $lawBlock = ["RETRIEVED LEGISLATION:\n"];
+            $authority = LegalAuthorityTaxonomyService::legislation();
             foreach ($lawResults as $i => $law) {
                 /** @var LawResult $law */
                 $num          = $i + 1;
@@ -771,6 +791,8 @@ INST,
 
                 $lawBlock[] = <<<BLOCK
 --- LAW #{$num} ---
+AUTHORITY_STATUS: {$authority['authority_status']} | Binding: yes
+AUTHORITY_CAVEAT: {$authority['authority_caveat']}
 Law: {$law->title}
 {$articleLabel}
 Similarity: {$law->similarity}
@@ -792,6 +814,7 @@ BLOCK;
         // ── EU documents block ────────────────────────────────────────────────
         if (!empty($euResults)) {
             $euBlock = ["RETRIEVED EU DOCUMENTS (EU Legislation & CJEU Case Law):\n"];
+            $authority = LegalAuthorityTaxonomyService::comparativeNonBinding('EU/CJEU');
             foreach ($euResults as $i => $doc) {
                 $num      = $i + 1;
                 $typeLabel = match ($doc['doc_type']) {
@@ -808,6 +831,8 @@ BLOCK;
 
                 $euBlock[] = <<<BLOCK
 --- EU DOC #{$num} ---
+AUTHORITY_STATUS: {$authority['authority_status']} | Binding: no
+AUTHORITY_CAVEAT: {$authority['authority_caveat']}
 Type: {$typeLabel}
 Title: {$doc['title']}
 {$court}
@@ -827,6 +852,7 @@ BLOCK;
         // ── German cases block ───────────────────────────────────────────────
         if (!empty($germanResults)) {
             $germanBlock = ["RETRIEVED GERMAN COURT DECISIONS (გერმანული სასამართლო პრაქტიკა):\n"];
+            $authority = LegalAuthorityTaxonomyService::comparativeNonBinding('German court practice');
             foreach ($germanResults as $i => $doc) {
                 $num   = $i + 1;
                 $court = $doc['court_name'] ?? 'N/A';
@@ -835,6 +861,8 @@ BLOCK;
 
                 $germanBlock[] = <<<BLOCK
 --- GERMAN CASE #{$num} ---
+AUTHORITY_STATUS: {$authority['authority_status']} | Binding: no
+AUTHORITY_CAVEAT: {$authority['authority_caveat']}
 Court: {$court} ({$level})
 Year: {$year}
 Similarity: {$doc['similarity']}
@@ -850,6 +878,7 @@ BLOCK;
         // ── Constitutional Court block ────────────────────────────────────────
         if (!empty($constCourtResults)) {
             $ccBlock = ["RETRIEVED GEORGIAN CONSTITUTIONAL COURT DECISIONS (საკონსტიტუციო სასამართლო):\n"];
+            $authority = LegalAuthorityTaxonomyService::constitutionalCourt();
             foreach ($constCourtResults as $i => $doc) {
                 $num      = $i + 1;
                 $caseNum  = $doc['case_number'] ?? 'N/A';
@@ -862,6 +891,8 @@ BLOCK;
 
                 $ccBlock[] = <<<BLOCK
 --- CONST COURT #{$num} ---
+AUTHORITY_STATUS: {$authority['authority_status']} | Binding: yes
+AUTHORITY_CAVEAT: {$authority['authority_caveat']}
 Case: {$caseNum} | Type: {$type} | Date: {$date}
 College: {$college}
 Respondent: {$respond}
@@ -880,6 +911,7 @@ BLOCK;
         // ── ECHR cases block ──────────────────────────────────────────────────
         if (!empty($echrResults)) {
             $echrBlock = ["RETRIEVED ECHR CASES:\n"];
+            $authority = LegalAuthorityTaxonomyService::echr();
             foreach ($echrResults as $i => $echr) {
                 $num         = $i + 1;
                 $title       = $echr instanceof EchrResult ? $echr->title : ($echr['title'] ?? '');
@@ -901,6 +933,8 @@ BLOCK;
 
                 $echrBlock[] = <<<BLOCK
 --- ECHR CASE #{$num} ---
+AUTHORITY_STATUS: {$authority['authority_status']} | Binding: yes
+AUTHORITY_CAVEAT: {$authority['authority_caveat']}
 Title: {$title}
 Application No: {$application}
 Date: {$date}
@@ -948,6 +982,11 @@ GUARD;
             $num  = $i + 1;
             $role = $d['answer_role'] ?? ($i < 2 ? 'primary' : 'supporting');
             $roleLabel = $role === 'primary' ? 'PRIMARY AUTHORITY' : 'SUPPORTING ANALOGY';
+            $authorityStatus = $d['authority_status'] ?? 'persuasive_supreme';
+            $authorityBinding = !empty($d['authority_binding']) ? 'yes' : 'no';
+            $authorityCaveat = $d['authority_caveat']
+                ?? 'Do not call this source mandatory precedent unless AUTHORITY_STATUS is binding_full_chamber.';
+            $authorityStatusLabel = $d['authority_status_label'] ?? $authorityStatus;
             $roleInstruction = $d['usage_instruction'] ?? (
                 $role === 'primary'
                     ? 'Use as a main authority for the legal answer.'
@@ -980,7 +1019,7 @@ GUARD;
             $authorityNote = '';
             if (!empty($d['authority_details'])) {
                 $auth = $d['authority_details'];
-                $authorityNote = "\nAUTHORITY: court={$auth['court_score']} year={$auth['year_score']} joint={$auth['joint_bonus']} total={$auth['total']}";
+                $authorityNote = "\nAUTHORITY_SCORE: court={$auth['court_score']} year={$auth['year_score']} joint={$auth['joint_bonus']} total={$auth['total']}";
             }
             $outlierNote = in_array('outlier', $flags)
                 ? "\n⚠️ OUTLIER: " . ($d['outlier_note'] ?? 'minority position') . " — გამოიყენე სიფრთხილით"
@@ -1035,6 +1074,8 @@ GUARD;
 --- DECISION #{$num} ({$roleLabel}) ---
 {$meta}
 USE ROLE: {$roleLabel} — {$roleInstruction}
+AUTHORITY_STATUS: {$authorityStatus} | {$authorityStatusLabel} | Binding: {$authorityBinding}
+AUTHORITY_CAVEAT: {$authorityCaveat}
 Relevance: {$d['relevance_score']}{$combinedScore} | Chunks: {$d['chunk_count']} | Mode: {$status}{$mandatoryCitation}{$semanticSection}{$authorityNote}{$outlierNote}{$trendNote}{$qualityNote}{$keyFactsSection}{$evidenceSection}
 
 TEXT:
@@ -1057,6 +1098,8 @@ BLOCK;
      */
     private function buildMatsneBlock(array $matsneResults): string
     {
+        $authority = LegalAuthorityTaxonomyService::legislation();
+
         // Separate article-specific results from semantic results
         $articleDocs  = [];
         $semanticDocs = [];
@@ -1113,6 +1156,8 @@ ART;
 
                 $lawSections[] = <<<LAW
 ╔══ {$title}{$yearsStr} | {$active} ══╗
+AUTHORITY_STATUS: {$authority['authority_status']} | Binding: yes
+AUTHORITY_CAVEAT: {$authority['authority_caveat']}
 URL: {$url}{$stemNote}
 {$articlesBlock}
 ╚══ END: {$title} ══╝
@@ -1136,6 +1181,8 @@ LAW;
 
                 $semanticLines[] = <<<BLOCK
 --- MATSNE DOC #{$num} ---
+AUTHORITY_STATUS: {$authority['authority_status']} | Binding: yes
+AUTHORITY_CAVEAT: {$authority['authority_caveat']}
 Title: {$doc['title']}
 Type: {$docType} | Issuer: {$issuer}
 Status: {$active} | Years: {$years}

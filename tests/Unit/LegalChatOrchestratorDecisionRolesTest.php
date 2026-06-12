@@ -19,8 +19,8 @@ class LegalChatOrchestratorDecisionRolesTest extends TestCase
         $method = new ReflectionMethod($service, 'annotateDecisionRoles');
 
         $result = $method->invoke($service, [
-            ['case_id' => 101],
-            ['case_id' => 202],
+            ['case_id' => 101, 'court' => 'საქართველოს უზენაესი სასამართლო', 'chamber' => 'სამოქალაქო საქმეთა პალატა'],
+            ['case_id' => 202, 'court' => 'თბილისის სააპელაციო სასამართლო', 'chamber' => 'ადმინისტრაციულ საქმეთა პალატა'],
             ['case_id' => 303],
             ['case_id' => 404],
         ]);
@@ -29,7 +29,29 @@ class LegalChatOrchestratorDecisionRolesTest extends TestCase
         $this->assertSame([1, 2, 3, 4], array_column($result, 'answer_rank'));
         $this->assertSame('მთავარი შესაბამისი საქმე', $result[0]['answer_role_label']);
         $this->assertSame('დამხმარე მსგავსი საქმე', $result[2]['answer_role_label']);
+        $this->assertSame('persuasive_supreme', $result[0]['authority_status']);
+        $this->assertFalse($result[0]['authority_binding']);
+        $this->assertSame('persuasive_appellate', $result[1]['authority_status']);
         $this->assertStringContainsString('supporting analogous practice', $result[2]['usage_instruction']);
+    }
+
+    public function test_it_marks_full_or_joint_supreme_decision_as_binding_status(): void
+    {
+        config(['openai.primary_case_limit' => 2]);
+
+        $service = (new ReflectionClass(LegalChatOrchestratorService::class))->newInstanceWithoutConstructor();
+        $method = new ReflectionMethod($service, 'annotateDecisionRoles');
+
+        $result = $method->invoke($service, [
+            [
+                'case_id' => 101,
+                'court' => 'საქართველოს უზენაესი სასამართლო',
+                'chamber' => 'გაერთიანებული პალატა',
+            ],
+        ]);
+
+        $this->assertSame('binding_full_chamber', $result[0]['authority_status']);
+        $this->assertTrue($result[0]['authority_binding']);
     }
 
     public function test_it_marks_exact_case_card_issue_matches_as_primary(): void

@@ -3,6 +3,7 @@
 namespace App\Services\Echr;
 
 use App\DTOs\EchrResult;
+use App\Services\AI\LegalAuthorityTaxonomyService;
 
 /**
  * Builds frontend-ready ECHR citation objects from EchrResult DTOs.
@@ -16,6 +17,8 @@ class EchrCitationBuilder
      */
     public function build(array $results): array
     {
+        $authority = LegalAuthorityTaxonomyService::echr();
+
         return array_map(fn(EchrResult $r) => [
             'type'               => 'echr',
             'case_id'            => $r->caseId,
@@ -33,6 +36,10 @@ class EchrCitationBuilder
             'excerpt'            => $r->excerpt,
             'relevance_score'    => $r->similarity,
             'source_url'         => $r->sourceUrl,
+            'authority_status'   => $authority['authority_status'],
+            'authority_status_label' => $authority['authority_status_label'],
+            'authority_binding'  => $authority['authority_binding'],
+            'authority_caveat'   => $authority['authority_caveat'],
         ], $results);
     }
 }

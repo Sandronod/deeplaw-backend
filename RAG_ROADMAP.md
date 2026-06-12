@@ -26,6 +26,27 @@ Implemented today:
   - retry uses the same retrieved sources and a focused correction prompt
   - final DB meta includes `answer_correction`
   - SSE `done.content` returns the final corrected content, so the frontend replaces streamed draft text
+- Added source authority taxonomy:
+  - domestic decisions now carry `authority_status`, `authority_binding`, and `authority_caveat`
+  - ordinary Supreme/Appellate/Lower decisions are treated as persuasive, not automatically binding
+  - Supreme full/joint chamber decisions are marked `binding_full_chamber`
+  - Matsne/law sources are marked `binding_legislation`
+  - Constitutional Court sources are marked `constitutional_binding_erga_omnes`
+  - ECHR sources are marked `echr_interpretive_authority`
+  - EU/German sources are marked `comparative_non_binding`
+- Answer prompts and verified citation blocks now instruct the model to respect `AUTHORITY_STATUS`.
+- `AnswerValidatorService` now flags a non-binding domestic case if the answer calls it a binding precedent.
+- Criminal/procedural ECHR routing was strengthened:
+  - Article 7 / nulla poena is now detected
+  - detention, arrest, preventive measure, charge, judgment, and fair-trial signals can enable ECHR retrieval
+  - ECHR can auto-run on a strong ECHR source plan even when the default UI source set is only court/matsne
+- Matsne version filtering now uses a retrieved case year when the user asks about a specific case and did not state a separate temporal year.
+- Chat message endpoints now use a named `chat-stream` throttle.
+- Streaming UX now reports granular pipeline phases:
+  - question analysis, legal issue triage, query normalization
+  - case retrieval, law lookup, ECHR lookup, comparative lookup
+  - reranking, authority check, context building, answer writing, validation, and finalization
+  - frontend labels use concise Georgian phase text while keeping the elapsed timer visible
 - LLM-as-Judge remains async/optional and is not used as a blocking production gate.
 
 Still not implemented:
@@ -178,7 +199,7 @@ Latest verified commands (2026-06-11):
 Result:
 
 ```text
-99 passed (443 assertions)
+105 passed (458 assertions)
 ```
 
 Frontend:
@@ -208,6 +229,8 @@ Important env/model variables:
 OPENAI_CHAT_MODEL=gpt-4.1
 OPENAI_EXTRACTION_MODEL=gpt-4.1-mini
 OPENAI_JUDGE_MODEL=o4-mini
+CHAT_STREAM_RATE_LIMIT_PER_MINUTE=6
+CHAT_STREAM_IP_RATE_LIMIT_PER_MINUTE=30
 EVAL_JUDGE_ENABLED=false # recommended default for production unless QA mode
 ```
 

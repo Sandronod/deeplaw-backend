@@ -42,6 +42,24 @@ class AnswerValidatorService
         'სასამართლო პრაქტიკით დასტურდება',
     ];
 
+    private const BINDING_AUTHORITY_CLAIM_PHRASES = [
+        'სავალდებულო პრეცედენტ',
+        'სავალდებულო ძალა აქვს',
+        'სავალდებულოა სასამართლოებისთვის',
+        'სასამართლოები ვალდებულნი არიან',
+        'binding precedent',
+        'binding authority',
+        'mandatory precedent',
+    ];
+
+    private const NON_BINDING_NEGATION_PHRASES = [
+        'არ არის სავალდებულო',
+        'არ წარმოადგენს სავალდებულო',
+        'არ აქვს სავალდებულო',
+        'არასავალდებულო',
+        'არ უწოდო სავალდებულო',
+    ];
+
     private const REMEDY_OUTCOME_KEYWORDS = [
         'invalidity' => ['ბათილ', 'არარა', 'ნამდვილი არ არის'],
         'avoidance' => ['შეცილ', 'მოტყუ', 'სადავო გახდეს'],
@@ -111,6 +129,10 @@ class AnswerValidatorService
             $flags[] = $weakCaseFlag;
         }
 
+        foreach ($this->detectNonBindingCaseCalledBinding($answerText, $decisions) as $authorityFlag) {
+            $flags[] = $authorityFlag;
+        }
+
         foreach ($this->detectRemedyMismatchClaims($answerText, $decisions, $matsneResults, $echrResults, $extractedRules) as $remedyFlag) {
             $flags[] = $remedyFlag;
         }
@@ -136,6 +158,7 @@ class AnswerValidatorService
                 'unsupported_case_law_claim' => (bool) array_filter($flags, fn (array $f) => $f['type'] === 'unsupported_case_law_claim'),
                 'overstated_weak_case_law_claims' => count(array_filter($flags, fn (array $f) => $f['type'] === 'overstated_weak_case_law_claim')),
                 'weak_case_authority_claims' => count(array_filter($flags, fn (array $f) => $f['type'] === 'weak_case_authority_claim')),
+                'non_binding_authority_claims' => count(array_filter($flags, fn (array $f) => $f['type'] === 'non_binding_case_called_binding')),
                 'remedy_mismatch_claims' => count(array_filter($flags, fn (array $f) => in_array($f['type'], ['unsupported_legal_remedy', 'defect_nullity_conflation', 'defect_notice_as_challenge_period'], true))),
                 'procedural_mismatch_claims' => count(array_filter($flags, fn (array $f) => in_array($f['type'], ['wrong_threshold_boundary', 'contradictory_boundary_application'], true))),
             ],
@@ -360,6 +383,51 @@ class AnswerValidatorService
         $score = (float) ($decision['semantic_relevance_score'] ?? 100.0);
 
         return $confidence === 'low' || $score < 45.0;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $decisions
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectNonBindingCaseCalledBinding(string $answerText, array $decisions): array
+    {
+        if (empty($decisions)) {
+            return [];
+        }
+
+        $answerNormalized = $this->normalizeCaseText($answerText);
+        $flags = [];
+
+        foreach ($decisions as $decision) {
+            if (!empty($decision['authority_binding'])) {
+                continue;
+            }
+
+            $caseNum = (string) ($decision['case_num'] ?? '');
+            if ($caseNum === '' || !str_contains($answerNormalized, $this->normalizeCaseText($caseNum))) {
+                continue;
+            }
+
+            $window = $this->caseMentionWindow($answerText, $caseNum);
+            $lowerWindow = mb_strtolower($window);
+
+            if (!$this->containsAny($lowerWindow, self::BINDING_AUTHORITY_CLAIM_PHRASES)
+                || $this->containsAny($lowerWindow, self::NON_BINDING_NEGATION_PHRASES)
+            ) {
+                continue;
+            }
+
+            $status = (string) ($decision['authority_status'] ?? 'persuasive_or_supporting');
+            $flags[] = $this->flag(
+                'non_binding_case_called_binding',
+                'high',
+                "პასუხში {$caseNum} წარმოდგენილია როგორც სავალდებულო პრეცედენტი, მაგრამ წყაროს AUTHORITY_STATUS არის {$status}.",
+                $caseNum,
+                mb_substr($window, 0, 180),
+            );
+        }
+
+        return $flags;
     }
 
     private function caseMentionWindow(string $answerText, string $caseNum): string

@@ -9,7 +9,10 @@ use App\Services\AI\GeminiLegalAnswerService;
 use App\Services\AI\OllamaEmbeddingService;
 use App\Services\AI\OpenAIEmbeddingService;
 use App\Services\AI\OpenAILegalAnswerService;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
 use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Facades\RateLimiter;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -29,5 +32,19 @@ class AppServiceProvider extends ServiceProvider
         }
     }
 
-    public function boot(): void {}
+    public function boot(): void
+    {
+        RateLimiter::for('chat-stream', function (Request $request) {
+            $userLimit = max(1, (int) config('openai.chat_stream_rate_limit_per_minute', 6));
+            $ipLimit = max($userLimit, (int) config('openai.chat_stream_ip_rate_limit_per_minute', 30));
+            $userKey = $request->user()?->id
+                ? 'user:' . $request->user()->id
+                : 'guest:' . $request->ip();
+
+            return [
+                Limit::perMinute($userLimit)->by($userKey),
+                Limit::perMinute($ipLimit)->by('ip:' . $request->ip()),
+            ];
+        });
+    }
 }

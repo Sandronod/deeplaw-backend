@@ -48,6 +48,48 @@ class OpenAILegalAnswerEchrContextTest extends TestCase
         $this->assertStringContainsString('57292/16', $context);
         $this->assertStringContainsString('Articles: 10', $context);
         $this->assertStringContainsString('https://hudoc.echr.coe.int/example', $context);
+        $this->assertStringContainsString('AUTHORITY_STATUS: echr_interpretive_authority', $context);
+    }
+
+    public function test_it_labels_comparative_sources_as_non_binding(): void
+    {
+        $service = $this->app->make(OpenAILegalAnswerService::class);
+        $method = new ReflectionMethod($service, 'buildContextBlock');
+
+        $context = $method->invoke(
+            $service,
+            [],
+            0,
+            'explain',
+            [],
+            [],
+            [],
+            [
+                [
+                    'doc_type' => 'judgment',
+                    'title' => 'CJEU example',
+                    'court' => 'CJEU',
+                    'case_num' => 'C-1/20',
+                    'doc_date' => '2020-01-01',
+                    'similarity' => 0.72,
+                    'url' => 'https://example.test/eu',
+                    'excerpt' => 'EU source excerpt.',
+                ],
+            ],
+            [
+                [
+                    'court_name' => 'BGH',
+                    'level_of_appeal' => 'Federal',
+                    'date_year' => 2020,
+                    'similarity' => 0.71,
+                    'excerpt' => 'German source excerpt.',
+                ],
+            ],
+            [],
+        );
+
+        $this->assertStringContainsString('AUTHORITY_STATUS: comparative_non_binding', $context);
+        $this->assertStringContainsString('ქართულ სამართალში არ არის სავალდებულო', $context);
     }
 
     public function test_procedure_domain_includes_magistrate_subject_matter_guard(): void

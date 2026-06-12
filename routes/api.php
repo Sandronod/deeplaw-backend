@@ -28,6 +28,8 @@ Route::middleware('auth:sanctum')->prefix('chats')->group(function () {
     Route::patch('/{chat}/title',                   [LegalChatController::class, 'updateTitle']);
     Route::delete('/{chat}',                        [LegalChatController::class, 'destroy']);
     Route::get('/{chat}/messages',                  [LegalChatController::class, 'messages']);
-    Route::post('/{chat}/messages/stream',          [LegalChatController::class, 'streamMessage']);
-    Route::post('/{chat}/messages',                 [LegalChatController::class, 'sendMessage']);
+    Route::post('/{chat}/messages/stream',          [LegalChatController::class, 'streamMessage'])
+        ->middleware('throttle:chat-stream');
+    Route::post('/{chat}/messages',                 [LegalChatController::class, 'sendMessage'])
+        ->middleware('throttle:chat-stream');
 });

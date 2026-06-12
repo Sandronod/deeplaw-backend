@@ -42,9 +42,17 @@ class KnowledgeSourceRouter
         'ადამიანის უფლებათა ევროპული კონვენცია',
         'სტრასბურგ',
         'article 6', 'article 8', 'article 10', 'article 3',
-        'article 5', 'article 2', 'article 11', 'article 14',
+        'article 5', 'article 7', 'article 2', 'article 11', 'article 14',
         'fair trial', 'freedom of expression',
         'echr-ის', 'echr–ის',
+        'სამართლიანი სასამართლო',
+        'პატიმრობა',
+        'დაკავება',
+        'აღკვეთის ღონისძიება',
+        'ბრალდება',
+        'განაჩენი',
+        'nulla poena',
+        'სასჯელის უკუძალა',
     ];
 
     /**

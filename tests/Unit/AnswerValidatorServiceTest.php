@@ -179,6 +179,52 @@ class AnswerValidatorServiceTest extends TestCase
         $this->assertSame([], $result['flags']);
     }
 
+    public function test_it_flags_non_binding_case_called_binding_precedent(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: '3კ/722 არის სავალდებულო პრეცედენტი და სასამართლოები ვალდებულნი არიან იგივე წესით იმოქმედონ.',
+            decisions: [
+                [
+                    'case_num' => '3კ/722',
+                    'answer_role' => 'primary',
+                    'authority_status' => 'persuasive_supreme',
+                    'authority_binding' => false,
+                    'quality_flags' => [],
+                    'semantic_relevance_score' => 80.0,
+                    'semantic_relevance' => ['confidence' => 'high'],
+                ],
+            ],
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertSame('non_binding_case_called_binding', $result['flags'][0]['type']);
+    }
+
+    public function test_it_allows_non_binding_case_when_caveat_is_explicit(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: '3კ/722 არ არის სავალდებულო პრეცედენტი, მაგრამ შეიძლება გამოყენებულ იქნეს როგორც persuasive პრაქტიკა.',
+            decisions: [
+                [
+                    'case_num' => '3კ/722',
+                    'answer_role' => 'primary',
+                    'authority_status' => 'persuasive_supreme',
+                    'authority_binding' => false,
+                    'quality_flags' => [],
+                    'semantic_relevance_score' => 80.0,
+                    'semantic_relevance' => ['confidence' => 'high'],
+                ],
+            ],
+        );
+
+        $this->assertSame('pass', $result['verdict']);
+        $this->assertSame([], $result['flags']);
+    }
+
     public function test_it_flags_general_practice_confirmation_when_only_weak_cases_exist(): void
     {
         $validator = new AnswerValidatorService();

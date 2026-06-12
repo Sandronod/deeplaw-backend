@@ -158,12 +158,13 @@ class LegalChatController extends Controller
 
             try {
                 // ── Stage 1: retrieval pipeline ───────────────────────────────
-                $emit('status', ['phase' => 'searching']);
+                $progress = fn (string $phase) => $emit('status', ['phase' => $phase]);
 
                 $ctx = $this->orchestrator->prepare(
                     chat:         $chat,
                     userQuestion: $request->input('message'),
                     sources:      $request->input('sources', config('openai.default_sources', ['court', 'matsne'])),
+                    progress:     $progress,
                 );
 
                 // ── Stage 2: stream LLM tokens ────────────────────────────────
@@ -195,12 +196,14 @@ class LegalChatController extends Controller
                 }
 
                 $correctionStartedAt = microtime(true);
+                $emit('status', ['phase' => 'validating']);
                 $correctionResult = $this->orchestrator->applyValidationCorrectionGate($ctx, $fullText);
                 $fullText = $correctionResult['text'];
                 $ctx['answer_correction'] = $correctionResult['meta'];
                 $ctx['timings_ms']['answer_correction_gate'] = (int) ((microtime(true) - $correctionStartedAt) * 1000);
 
                 // ── Stage 3: persist & emit done immediately ──────────────────
+                $emit('status', ['phase' => 'finalizing']);
                 $assistantMessage = $this->orchestrator->finalize($chat, $ctx, $fullText, evalWillRun: true);
                 $finalText = $assistantMessage->content;
 

@@ -11,6 +11,7 @@ use App\Services\AI\AnswerPostProcessorService;
 use App\Services\AI\CitationVerifierService;
 use App\Services\AI\EvalJudgeService;
 use App\Services\AI\LegalRuleExtractorService;
+use App\Services\AI\LegalAuthorityTaxonomyService;
 use App\Models\Chat;
 use App\Models\ChatMessage;
 use App\Services\AI\ConfidenceAssessor;
@@ -113,8 +114,9 @@ class LegalChatOrchestratorService
      * Runs all pipeline steps up to (but not including) the LLM answer call.
      * Returns a context array that can be passed to finalize() after streaming.
      */
-    public function prepare(Chat $chat, string $userQuestion, array $sources = []): array
+    public function prepare(Chat $chat, string $userQuestion, array $sources = [], ?callable $progress = null): array
     {
+        $this->reportProgress($progress, 'preparing');
         $sources = $this->normalizeSources($sources);
 
         $startTime = microtime(true);
@@ -138,6 +140,7 @@ class LegalChatOrchestratorService
 
         // ── 3+4. Triage — intent + mode + issue spotting + domain + source plan ─
         $stageStartedAt = microtime(true);
+        $this->reportProgress($progress, 'triage');
         $triageResult = $this->triage->triage($userQuestion, $sources);
         $intent       = $triageResult->intent;
         $mode         = $triageResult->mode;
@@ -148,7 +151,7 @@ class LegalChatOrchestratorService
 
         // ── 5. Retrieval pipeline ─────────────────────────────────────────────
         $stageStartedAt = microtime(true);
-        [$retrieval, $parsedQuery, $debugFlags, $searchTerms, $ollamaEmbedding, $pipelineTimings] = $this->runPipeline($triageResult, $userQuestion, $sources);
+        [$retrieval, $parsedQuery, $debugFlags, $searchTerms, $ollamaEmbedding, $pipelineTimings] = $this->runPipeline($triageResult, $userQuestion, $sources, $progress);
         $timings['court_pipeline_total'] = $this->elapsedMs($stageStartedAt);
         $timings['court_pipeline'] = $pipelineTimings;
         $courtRankingQuery = $this->courtRankingQuery($triageResult, $searchTerms, $userQuestion);
@@ -168,6 +171,7 @@ class LegalChatOrchestratorService
 
         // ── 6a. Authority scoring — court level + year + joint panel ─────────
         $stageStartedAt = microtime(true);
+        $this->reportProgress($progress, 'authority_check');
         $scoredDecisions = $this->authorityScorer->score($retrieval->decisions, $mode);
         $timings['authority_scoring'] = $this->elapsedMs($stageStartedAt);
 
@@ -195,6 +199,7 @@ class LegalChatOrchestratorService
         );
         $initialCount   = count($scoredDecisions);
         $stageStartedAt = microtime(true);
+        $this->reportProgress($progress, 'reranking');
         $finalDecisions = $this->annotateDecisionRoles(
             $this->reranker->rerank($courtRankingQuery, $scoredDecisions, $topK, $mode),
         );
@@ -225,7 +230,7 @@ class LegalChatOrchestratorService
         if (!$triageResult->isChatOnly()) {
             $lawDomains = $triageResult->domains;
             $wantsMatsne     = empty($sources) || in_array('matsne', $sources, true);
-            $wantsEchr       = empty($sources) || in_array('echr', $sources, true);
+            $wantsEchr       = empty($sources) || in_array('echr', $sources, true) || $sourcePlan->useEchr;
             $wantsEu         = empty($sources) || in_array('eu', $sources, true);
             $wantsGerman     = empty($sources) || in_array('german', $sources, true);
             $wantsConstCourt = empty($sources) || in_array('const_court', $sources, true);
@@ -233,6 +238,7 @@ class LegalChatOrchestratorService
             if ($wantsEchr && $sourcePlan->useEchr && $parsedQuery !== null) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $this->reportProgress($progress, 'echr_lookup');
                     $echrText = $searchTerms ?: $userQuestion;
                     $echrEmbedding = Cache::remember(
                         'echr_embed_' . md5($echrText . config('openai.embedding_model')),
@@ -256,14 +262,17 @@ class LegalChatOrchestratorService
                 // ── Article detector first — no Ollama needed (direct LIKE query) ─
                 try {
                     $sourceStartedAt = microtime(true);
+                    $this->reportProgress($progress, 'law_lookup');
                     $articleDetectorQuery = trim(implode("\n", array_filter([
                         $userQuestion,
                         (string) $triageResult->searchQuery,
                     ])));
+                    $relevantYear = $this->resolveRelevantLawYear($triageResult, $finalDecisions, $parsedQuery);
+                    $debugFlags['relevant_law_year'] = $relevantYear;
                     $matsneResults = $this->articleDetector->detect(
                         $articleDetectorQuery,
                         $lawDomains,
-                        $triageResult->temporalYear ?? (int) date('Y'),
+                        $relevantYear,
                     );
                     $timings['article_detector'] = $this->elapsedMs($sourceStartedAt);
                     if (!empty($matsneResults)) {
@@ -287,7 +296,9 @@ class LegalChatOrchestratorService
             // explicitly cite but are semantically relevant (e.g. limitation articles
             // alongside substantive defect articles). Domain filter prevents cross-domain
             // noise. ArticleDetector hits (similarity 0.95) dominate the 6-article cap.
-            $relevantYear = $triageResult->temporalYear ?? (int) date('Y');
+            $relevantYear = $debugFlags['relevant_law_year']
+                ?? $this->resolveRelevantLawYear($triageResult, $finalDecisions, $parsedQuery);
+            $debugFlags['relevant_law_year'] = $relevantYear;
             if ($useSemanticNormSupplement && $wantsMatsne && $triageResult->needsNorms && !empty($lawDomains) && empty($ollamaEmbedding)) {
                 try {
                     $sourceStartedAt = microtime(true);
@@ -310,6 +321,7 @@ class LegalChatOrchestratorService
             if ($useSemanticNormSupplement && $wantsMatsne && !empty($ollamaEmbedding) && !empty($lawDomains)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $this->reportProgress($progress, 'law_lookup');
                     $semanticArticles = $this->semanticArticleRetriever->retrieve($ollamaEmbedding, $lawDomains, relevantYear: $relevantYear);
                     if (!empty($semanticArticles)) {
                         $existingKeys = [];
@@ -368,6 +380,7 @@ class LegalChatOrchestratorService
             if ($needsMatsneSemantic && !empty($ollamaEmbedding)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $this->reportProgress($progress, 'law_lookup');
                     $matsneResults = $this->matsneRetriever->retrieve(
                         $searchTerms ?: $userQuestion,
                         embedding:    $ollamaEmbedding,
@@ -388,6 +401,7 @@ class LegalChatOrchestratorService
             if ($wantsEu && $triageResult->needsEu && !empty($ollamaEmbedding)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $this->reportProgress($progress, 'comparative_lookup');
                     $euResults = $this->euRetriever->retrieve($searchTerms ?: $userQuestion, embedding: $ollamaEmbedding);
                     $timings['eu_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: EU retrieval', ['count' => count($euResults)]);
@@ -400,6 +414,7 @@ class LegalChatOrchestratorService
             if ($wantsGerman && $triageResult->needsGerman && !empty($ollamaEmbedding)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $this->reportProgress($progress, 'comparative_lookup');
                     $germanResults = $this->germanRetriever->retrieve($searchTerms ?: $userQuestion, embedding: $ollamaEmbedding);
                     $timings['german_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: german retrieval', ['count' => count($germanResults)]);
@@ -412,6 +427,7 @@ class LegalChatOrchestratorService
             if ($wantsConstCourt && $triageResult->needsConstCourt && !empty($ollamaEmbedding)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $this->reportProgress($progress, 'authority_check');
                     $constCourtResults = $this->constCourtRetriever->retrieve($searchTerms ?: $userQuestion, $ollamaEmbedding);
                     $timings['const_court_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: const_court retrieval', ['count' => count($constCourtResults)]);
@@ -430,6 +446,7 @@ class LegalChatOrchestratorService
         if (!empty($matsneResults) && $this->shouldExtractRules($triageResult, $userQuestion, $matsneResults)) {
             try {
                 $stageStartedAt = microtime(true);
+                $this->reportProgress($progress, 'context_building');
                 $extractedRules = $this->ruleExtractor->extract($userQuestion, $matsneResults);
                 $timings['rule_extraction'] = $this->elapsedMs($stageStartedAt);
             } catch (\Throwable $e) {
@@ -444,6 +461,7 @@ class LegalChatOrchestratorService
 
         // ── 10. Conversation history ──────────────────────────────────────────
         $stageStartedAt = microtime(true);
+        $this->reportProgress($progress, 'context_building');
         $history = $this->buildHistory($chat, $userMessage->id);
         $timings['history_build'] = $this->elapsedMs($stageStartedAt);
         $timings['prepare_total'] = $this->elapsedMs($startTime);
@@ -1273,7 +1291,7 @@ PROMPT;
         return trim(preg_replace('/\R{2,}/u', "\n", $text) ?? $text);
     }
 
-    private function runPipeline(TriageResult $triage, string $userQuestion, array $sources = []): array
+    private function runPipeline(TriageResult $triage, string $userQuestion, array $sources = [], ?callable $progress = null): array
     {
         $timings = [];
         $debugFlags = [
@@ -1296,6 +1314,7 @@ PROMPT;
         // No court source — skip court retrieval, still need parsedQuery for matsne routing
         if (!$triage->needsCases) {
             $stageStartedAt = microtime(true);
+            $this->reportProgress($progress, 'query_normalizing');
             $parsedQuery = $this->queryParser->parse($userQuestion, $triage->searchQuery);
             $timings['query_parse'] = $this->elapsedMs($stageStartedAt);
             $debugFlags['retrieval_strategy'] = 'norms_only';
@@ -1303,6 +1322,7 @@ PROMPT;
         }
 
         $stageStartedAt = microtime(true);
+        $this->reportProgress($progress, 'query_normalizing');
         $parsedQuery = $this->queryParser->parse($userQuestion, $triage->searchQuery);
         $rawSearchText = trim((string) ($triage->searchQuery ?: $parsedQuery->terms));
         if (!$this->isUsableExtractedSearchText($userQuestion, $rawSearchText)) {
@@ -1367,6 +1387,7 @@ PROMPT;
         $debugFlags['retrieval_strategy'] = $strategy;
 
         $stageStartedAt = microtime(true);
+        $this->reportProgress($progress, 'case_retrieval');
         $retrieval = $this->retriever->retrieve(
             rawEmbedding:         $courtEmbedding,
             searchTerms:          $courtSearchText,
@@ -1464,6 +1485,22 @@ PROMPT;
         return (int) round((microtime(true) - $startedAt) * 1000);
     }
 
+    private function reportProgress(?callable $progress, string $phase): void
+    {
+        if ($progress === null) {
+            return;
+        }
+
+        try {
+            $progress($phase);
+        } catch (\Throwable $e) {
+            Log::debug('Orchestrator: progress callback failed', [
+                'phase' => $phase,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     private function visibleSourceBudget(array $ctx): int
     {
         $mode = (string) ($ctx['mode'] ?? 'explain');
@@ -1518,6 +1555,8 @@ PROMPT;
 
     private function buildMatsneCitations(array $matsneResults): array
     {
+        $authority = LegalAuthorityTaxonomyService::legislation();
+
         return array_map(fn(array $r) => [
             'type'               => 'matsne',
             'matsne_id'          => $r['matsne_id'],
@@ -1531,11 +1570,17 @@ PROMPT;
             'excerpt'            => $r['excerpt'],
             'similarity'         => $r['similarity'],
             'url'                => $r['url'],
+            'authority_status' => $authority['authority_status'],
+            'authority_status_label' => $authority['authority_status_label'],
+            'authority_binding' => $authority['authority_binding'],
+            'authority_caveat' => $authority['authority_caveat'],
         ], $matsneResults);
     }
 
     private function buildEuCitations(array $euResults): array
     {
+        $authority = LegalAuthorityTaxonomyService::comparativeNonBinding('EU/CJEU');
+
         return array_map(fn(array $r) => [
             'type'       => 'eu',
             'cellar_id'  => $r['cellar_id'],
@@ -1548,11 +1593,17 @@ PROMPT;
             'excerpt'    => $r['excerpt'],
             'similarity' => $r['similarity'],
             'url'        => $r['url'],
+            'authority_status' => $authority['authority_status'],
+            'authority_status_label' => $authority['authority_status_label'],
+            'authority_binding' => $authority['authority_binding'],
+            'authority_caveat' => $authority['authority_caveat'],
         ], $euResults);
     }
 
     private function buildConstCourtCitations(array $constCourtResults): array
     {
+        $authority = LegalAuthorityTaxonomyService::constitutionalCourt();
+
         return array_map(fn(array $r) => [
             'type'          => 'const_court',
             'legal_id'      => $r['legal_id'],
@@ -1566,11 +1617,17 @@ PROMPT;
             'excerpt'       => $r['excerpt'],
             'similarity'    => $r['score'],
             'url'           => $r['url'],
+            'authority_status' => $authority['authority_status'],
+            'authority_status_label' => $authority['authority_status_label'],
+            'authority_binding' => $authority['authority_binding'],
+            'authority_caveat' => $authority['authority_caveat'],
         ], $constCourtResults);
     }
 
     private function buildGermanCitations(array $germanResults): array
     {
+        $authority = LegalAuthorityTaxonomyService::comparativeNonBinding('German court practice');
+
         return array_map(fn(array $r) => [
             'type'            => 'german',
             'case_id'         => $r['case_id'],
@@ -1581,6 +1638,10 @@ PROMPT;
             'date_year'       => $r['date_year'],
             'excerpt'         => $r['excerpt'],
             'similarity'      => $r['similarity'],
+            'authority_status' => $authority['authority_status'],
+            'authority_status_label' => $authority['authority_status_label'],
+            'authority_binding' => $authority['authority_binding'],
+            'authority_caveat' => $authority['authority_caveat'],
         ], $germanResults);
     }
 
@@ -1606,6 +1667,10 @@ PROMPT;
                 'ranking_explanation' => $d['ranking_explanation'] ?? null,
                 'answer_role'     => $d['answer_role'] ?? null,
                 'answer_role_label' => $d['answer_role_label'] ?? null,
+                'authority_status' => $d['authority_status'] ?? null,
+                'authority_status_label' => $d['authority_status_label'] ?? null,
+                'authority_binding' => $d['authority_binding'] ?? null,
+                'authority_caveat' => $d['authority_caveat'] ?? null,
                 'answer_rank'     => $d['answer_rank'] ?? null,
                 'case_type'       => $caseType,
                 'url'             => "/fullcase/{$caseType}/{$d['case_id']}",
@@ -1633,8 +1698,12 @@ PROMPT;
             $decision['answer_role_label'] = $role === 'primary'
                 ? 'მთავარი შესაბამისი საქმე'
                 : 'დამხმარე მსგავსი საქმე';
+            $decision = array_merge(
+                $decision,
+                LegalAuthorityTaxonomyService::forDomesticDecision($decision, $role),
+            );
             $decision['usage_instruction'] = match (true) {
-                $role === 'primary' => 'Use as a main authority for the legal answer.',
+                $role === 'primary' => 'Use as a main authority for the legal answer. Respect AUTHORITY_STATUS; do not call persuasive decisions mandatory precedent.',
                 $isWeakMatch => 'Weak/analogous match only. Do NOT cite as direct authority; mention only if clearly useful as limited analogy.',
                 default => 'Use only as supporting analogous practice if it confirms the same legal issue.',
             };
@@ -1688,6 +1757,51 @@ PROMPT;
     }
 
     /**
+     * Pick the law year used for Matsne version filtering.
+     *
+     * User-stated years win. If the user asked for a specific retrieved case,
+     * use that case date so historical decisions are analyzed against the law
+     * version that could have governed the dispute.
+     *
+     * @param array<int, array<string, mixed>> $decisions
+     */
+    private function resolveRelevantLawYear(TriageResult $triage, array $decisions, ?ParsedQuery $parsedQuery): int
+    {
+        if ($triage->temporalYear !== null) {
+            return $triage->temporalYear;
+        }
+
+        if ($parsedQuery?->yearFrom !== null) {
+            return $parsedQuery->yearFrom;
+        }
+
+        if ($parsedQuery?->hasCaseNumber() || count($decisions) === 1) {
+            $year = $this->yearFromDecisionDate($decisions[0]['case_date'] ?? null);
+            if ($year !== null) {
+                return $year;
+            }
+        }
+
+        return (int) date('Y');
+    }
+
+    private function yearFromDecisionDate(mixed $date): ?int
+    {
+        if ($date instanceof \Carbon\Carbon) {
+            return (int) $date->format('Y');
+        }
+
+        if (is_string($date) && preg_match('/\b(19|20)\d{2}\b/', $date, $m)) {
+            $year = (int) $m[0];
+            if ($year >= 1990 && $year <= (int) date('Y')) {
+                return $year;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * @param array<int, array<string, mixed>> $decisions
      * @return array<int, array<string, mixed>>
      */
@@ -1697,6 +1811,8 @@ PROMPT;
             'case_id' => $d['case_id'] ?? null,
             'case_num' => $d['case_num'] ?? null,
             'answer_role' => $d['answer_role'] ?? null,
+            'authority_status' => $d['authority_status'] ?? null,
+            'authority_binding' => $d['authority_binding'] ?? null,
             'answer_rank' => $d['answer_rank'] ?? null,
             'semantic_relevance_score' => $d['semantic_relevance_score'] ?? null,
             'semantic_relevance' => $d['semantic_relevance'] ?? null,

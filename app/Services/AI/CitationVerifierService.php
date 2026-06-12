@@ -121,8 +121,14 @@ class CitationVerifierService
 
         if (!empty($primaryCaseNums)) {
             $lines[] = "✅ სასამართლო გადაწყვეტილებები — PRIMARY AUTHORITY:";
-            foreach ($primaryCaseNums as $num) {
-                $lines[] = "   • {$num}";
+            foreach ($decisions as $decision) {
+                $num = $decision['case_num'] ?? null;
+                if (!$num || !in_array($num, $primaryCaseNums, true)) {
+                    continue;
+                }
+                $status = $decision['authority_status'] ?? 'persuasive_supreme';
+                $caveat = $decision['authority_caveat'] ?? 'არ უწოდო სავალდებულო პრეცედენტი, თუ სტატუსი binding_full_chamber არ არის.';
+                $lines[] = "   • {$num} — AUTHORITY_STATUS={$status}; {$caveat}";
             }
         } elseif (!empty($caseNums)) {
             $lines[] = "⚠️ სასამართლო გადაწყვეტილებები — direct primary authority არ მოიძებნა:";
@@ -130,8 +136,13 @@ class CitationVerifierService
 
         if (!empty($supportingCaseNums)) {
             $lines[] = "\n⚠️ SUPPORTING / WEAK ANALOGY ONLY:";
-            foreach ($supportingCaseNums as $num) {
-                $lines[] = "   • {$num} — არ გამოიყენო როგორც პირდაპირი/მთავარი პრაქტიკა; მხოლოდ შეზღუდული ანალოგია.";
+            foreach ($decisions as $decision) {
+                $num = $decision['case_num'] ?? null;
+                if (!$num || !in_array($num, $supportingCaseNums, true)) {
+                    continue;
+                }
+                $status = $decision['authority_status'] ?? 'supporting_analogy';
+                $lines[] = "   • {$num} — AUTHORITY_STATUS={$status}; არ გამოიყენო როგორც პირდაპირი/მთავარი პრაქტიკა; მხოლოდ შეზღუდული ანალოგია.";
             }
         }
 
