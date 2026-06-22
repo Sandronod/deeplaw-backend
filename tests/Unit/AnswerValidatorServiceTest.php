@@ -398,4 +398,242 @@ class AnswerValidatorServiceTest extends TestCase
         $this->assertSame([], $result['flags']);
         $this->assertSame(['50000'], $result['checked']['answer_legal_numbers']);
     }
+
+    public function test_it_flags_generic_source_placeholder_in_large_issue_answer(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: "📕 კანონი/ნორმა: ადმინისტრაციული სამართალწარმოების ზოგადი პრინციპები\nგადაწყვეტილება მოწმდება სრულყოფილი სასამართლო კონტროლით.",
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('generic_source_placeholder', array_column($result['flags'], 'type'));
+        $this->assertSame(1, $result['summary']['generic_source_placeholders']);
+    }
+
+    public function test_it_flags_source_line_with_code_name_but_no_article(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: "- **წყარო:** შრომის კოდექსი\n- თუ ბონუსი გამომუშავებულია, მისი არგადახდა დაუშვებელია.",
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('generic_source_placeholder', array_column($result['flags'], 'type'));
+    }
+
+    public function test_it_flags_personal_data_articles_not_found_when_personal_data_articles_are_retrieved(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: '- **წყარო:** პერსონალურ მონაცემთა დაცვის შესახებ სპეციალური კანონი (მუხლები მოძიებული არ არის, მაგრამ მისი გამოყენება სავალდებულოა)',
+            matsneResults: [
+                [
+                    '_article_num' => 17,
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    'excerpt' => 'მუხლი 17. მონაცემთა უსაფრთხოება.',
+                ],
+            ],
+        );
+
+        $flagTypes = array_column($result['flags'], 'type');
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('generic_source_placeholder', $flagTypes);
+        $this->assertContains('privacy_law_source_denied', $flagTypes);
+    }
+
+    public function test_it_flags_real_estate_registry_answer_that_omits_retrieved_registry_articles(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: 'თუ ბინა საჯარო რეესტრში არ არის რეგისტრირებული, მყიდველი მესაკუთრედ არ ითვლება.',
+            matsneResults: [
+                [
+                    '_article_num' => 183,
+                    'title' => 'საქართველოს სამოქალაქო კოდექსი',
+                    'excerpt' => 'მუხლი 183. უძრავი ნივთის შესაძენად აუცილებელია რეგისტრაცია საჯარო რეესტრში.',
+                ],
+                [
+                    '_article_num' => 312,
+                    'title' => 'საქართველოს სამოქალაქო კოდექსი',
+                    'excerpt' => 'მუხლი 312. რეესტრის მონაცემთა უტყუარობისა და სისრულის პრეზუმფცია.',
+                ],
+            ],
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('real_estate_registry_source_omission', array_column($result['flags'], 'type'));
+        $this->assertSame(1, $result['summary']['special_source_omissions']);
+    }
+
+    public function test_it_flags_mortgage_answer_that_omits_retrieved_mortgage_articles(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: 'ბანკის იპოთეკა პრიორიტეტულია და ქონების რეალიზაცია შეუძლია.',
+            matsneResults: [
+                [
+                    '_article_num' => 286,
+                    'title' => 'საქართველოს სამოქალაქო კოდექსი',
+                    'excerpt' => 'მუხლი 286. იპოთეკა.',
+                ],
+                [
+                    '_article_num' => 300,
+                    'title' => 'საქართველოს სამოქალაქო კოდექსი',
+                    'excerpt' => 'მუხლი 300. იპოთეკით დატვირთული ნივთის რეალიზაციის მოთხოვნა.',
+                ],
+            ],
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('mortgage_source_omission', array_column($result['flags'], 'type'));
+    }
+
+    public function test_it_flags_real_estate_development_special_source_omissions(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: 'გაკოტრების პროცესში მყიდველები კრედიტორები არიან. დაურეგისტრირებელი ბინა მემკვიდრეობაში არ შედის. თაღლითობის განაჩენი გავლენას ახდენს სამოქალაქო დავაზე. კოლექტიური სარჩელი რთულია.',
+            matsneResults: [
+                [
+                    '_article_num' => 5,
+                    'title' => 'რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ',
+                    'excerpt' => 'მუხლი 5. კრედიტორული მოთხოვნები.',
+                ],
+                [
+                    '_article_num' => 52,
+                    'title' => 'რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ',
+                    'excerpt' => 'მუხლი 52. კრედიტორთა რეესტრის შედგენა.',
+                ],
+                [
+                    '_article_num' => 1328,
+                    'title' => 'საქართველოს სამოქალაქო კოდექსი',
+                    'excerpt' => 'მუხლი 1328. სამკვიდრო ქონება.',
+                ],
+                [
+                    '_article_num' => 106,
+                    'title' => 'საქართველოს სამოქალაქო საპროცესო კოდექსი',
+                    'excerpt' => 'მუხლი 106. ფაქტები, რომლებიც არ საჭიროებენ მტკიცებას.',
+                ],
+                [
+                    '_article_num' => 86,
+                    'title' => 'საქართველოს სამოქალაქო საპროცესო კოდექსი',
+                    'excerpt' => 'მუხლი 86. თანამონაწილეობის საფუძვლები.',
+                ],
+            ],
+        );
+
+        $flagTypes = array_column($result['flags'], 'type');
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('insolvency_source_omission', $flagTypes);
+        $this->assertContains('inheritance_source_omission', $flagTypes);
+        $this->assertContains('criminal_preclusion_source_omission', $flagTypes);
+        $this->assertContains('joinder_source_omission', $flagTypes);
+    }
+
+    public function test_it_flags_civil_code_55_used_for_penalty_reduction(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: "📕 კანონი/ნორმა: საქართველოს სამოქალაქო კოდექსი, მუხლი 55\nგამოყენება: სასამართლოს შეუძლია 1 მლნ ლარის პირგასამტეხლო შეამციროს, თუ ის გადაჭარბებულია.",
+            matsneResults: [
+                [
+                    '_article_num' => 55,
+                    'title' => 'საქართველოს სამოქალაქო კოდექსი',
+                    'excerpt' => 'მუხლი 55. გარიგების ბათილობა ძალაუფლების ბოროტად გამოყენების გამო.',
+                ],
+            ],
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('civil_code_55_misuse', array_column($result['flags'], 'type'));
+        $this->assertSame(1, $result['summary']['civil_code_55_misuse']);
+    }
+
+    public function test_it_flags_civil_code_55_used_for_reputational_damage(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: "📕 კანონი/ნორმა: საქართველოს სამოქალაქო კოდექსი, მუხლი 55\nმორალური/რეპუტაციული ზიანის ანაზღაურება დასაშვებია, თუ დადასტურდება არამატერიალური ზიანი.",
+            matsneResults: [
+                [
+                    '_article_num' => 55,
+                    'title' => 'საქართველოს სამოქალაქო კოდექსი',
+                    'excerpt' => 'მუხლი 55. გარიგების ბათილობა ძალაუფლების ბოროტად გამოყენების გამო.',
+                ],
+            ],
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('civil_code_55_misuse', array_column($result['flags'], 'type'));
+    }
+
+    public function test_it_flags_personal_data_issue_without_special_privacy_law(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: 'მონაცემთა გაჟონვაზე პასუხისმგებლობა ფასდება შრომის კოდექსის 60-ე და სამოქალაქო კოდექსის 417-ე მუხლებით.',
+            matsneResults: [
+                [
+                    '_article_num' => 17,
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    'excerpt' => 'მუხლი 17. მონაცემთა უსაფრთხოება. მონაცემთა დამმუშავებელი ვალდებულია მიიღოს შესაბამისი ორგანიზაციული და ტექნიკური ზომები.',
+                ],
+            ],
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('privacy_law_omission', array_column($result['flags'], 'type'));
+        $this->assertSame(1, $result['summary']['privacy_law_omissions']);
+    }
+
+    public function test_it_flags_when_answer_denies_retrieved_personal_data_law(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: 'სპეციალური ნორმა პერსონალურ მონაცემთა დაცვის შესახებ კანონის მიხედვით არ მოიძებნა.',
+            matsneResults: [
+                [
+                    '_article_num' => 17,
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    'excerpt' => 'მუხლი 17. მონაცემთა უსაფრთხოება.',
+                ],
+            ],
+        );
+
+        $this->assertSame('fail', $result['verdict']);
+        $this->assertContains('privacy_law_source_denied', array_column($result['flags'], 'type'));
+        $this->assertSame(1, $result['summary']['privacy_law_omissions']);
+    }
+
+    public function test_it_allows_civil_code_55_for_immoral_transaction_context(): void
+    {
+        $validator = new AnswerValidatorService();
+
+        $result = $validator->validate(
+            answerText: 'სკ-ის 55-ე მუხლი რელევანტურია ამორალური გარიგებისა და შესრულებათა აშკარა შეუსაბამობის შესაფასებლად.',
+            matsneResults: [
+                [
+                    '_article_num' => 55,
+                    'title' => 'საქართველოს სამოქალაქო კოდექსი',
+                    'excerpt' => 'მუხლი 55. გარიგების ბათილობა ძალაუფლების ბოროტად გამოყენების გამო.',
+                ],
+            ],
+        );
+
+        $this->assertSame('pass', $result['verdict']);
+        $this->assertSame([], $result['flags']);
+    }
 }

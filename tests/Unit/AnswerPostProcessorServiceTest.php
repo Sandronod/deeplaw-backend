@@ -50,4 +50,123 @@ class AnswerPostProcessorServiceTest extends TestCase
         $this->assertStringContainsString('პირდაპირი სასამართლო პრაქტიკა ვერ მოიძებნა', $result['text']);
         $this->assertContains('softened_non_primary_court_practice_claim', $result['changes']);
     }
+
+    public function test_it_removes_irrelevant_article_55_when_question_has_no_disproportion_issue(): void
+    {
+        $answer = "- მუხლი 55 — ბათილობა საბაზრო ძალაუფლების ბოროტად გამოყენების გამო.\n"
+            . "სამოქალაქო კოდექსის 55-ე მუხლი გამოიყენება მხოლოდ აშკარა დისპროპორციის შემთხვევაში.\n"
+            . 'ოფციონის ჩამორთმევა დასაშვებია მხოლოდ ხელშეკრულების მკაფიო საფუძვლით.';
+
+        $result = (new AnswerPostProcessorService())->process($answer, [
+            'userQuestion' => 'დასაქმებულის გათავისუფლება, ოფციონი, ბონუსი და პირგასამტეხლო',
+        ]);
+
+        $this->assertStringNotContainsString('55', $result['text']);
+        $this->assertContains('removed_irrelevant_article_55', $result['changes']);
+    }
+
+    public function test_it_corrects_personal_data_law_not_found_claim_when_source_exists(): void
+    {
+        $answer = 'სპეციალური ნორმა პერსონალურ მონაცემთა დაცვის შესახებ კანონის მიხედვით არ მოიძებნა. ადმინისტრაციული ჯარიმა ავტომატურად არ გადადის თანამშრომელზე.';
+
+        $result = (new AnswerPostProcessorService())->process($answer, [
+            'matsneResults' => [
+                [
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    '_article_num' => 17,
+                    'excerpt' => 'მუხლი 17. მონაცემთა უსაფრთხოება.',
+                ],
+            ],
+        ]);
+
+        $this->assertStringContainsString('არის სპეციალური წყარო', $result['text']);
+        $this->assertStringNotContainsString('არ მოიძებნა', $result['text']);
+        $this->assertContains('corrected_personal_data_law_not_found_claim', $result['changes']);
+    }
+
+    public function test_it_replaces_entire_personal_data_law_line_instead_of_partial_phrase(): void
+    {
+        $answer = "- **კანონი:** სპეციალური ნორმა „„პერსონალურ მონაცემთა დაცვის შესახებ“ კანონის მიხედვით არ მოიძებნა); შრომის კოდექსი, მუხლი 60\n"
+            . '- **ანალიზი:** ჯარიმა ავტომატურად არ გადადის თანამშრომელზე.';
+
+        $result = (new AnswerPostProcessorService())->process($answer, [
+            'matsneResults' => [
+                [
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    '_article_num' => 17,
+                    'excerpt' => 'მუხლი 17. მონაცემთა უსაფრთხოება.',
+                ],
+            ],
+        ]);
+
+        $this->assertStringContainsString('- **კანონი:** „პერსონალურ მონაცემთა დაცვის შესახებ“ კანონი, მუხლები 17 არის სპეციალური წყარო', $result['text']);
+        $this->assertStringNotContainsString('შრომის კოდექსი, მუხლი 60', $result['text']);
+        $this->assertStringNotContainsString('„„', $result['text']);
+        $this->assertStringNotContainsString('არ მოიძებნა', $result['text']);
+        $this->assertContains('corrected_personal_data_law_not_found_claim', $result['changes']);
+    }
+
+    public function test_it_replaces_personal_data_source_not_found_bullet_when_source_exists(): void
+    {
+        $answer = "**წყაროები:**\n"
+            . '- სპეციალური ნორმები პერსონალურ მონაცემთა დაცვის შესახებ მოძიებულ წყაროებში არ იძებნება';
+
+        $result = (new AnswerPostProcessorService())->process($answer, [
+            'matsneResults' => [
+                [
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    '_article_num' => 17,
+                    'excerpt' => 'მუხლი 17. მონაცემთა უსაფრთხოება.',
+                ],
+            ],
+        ]);
+
+        $this->assertStringContainsString('გამოიყენება მონაცემთა უსაფრთხოების', $result['text']);
+        $this->assertStringNotContainsString('არ იძებნება', $result['text']);
+        $this->assertContains('corrected_personal_data_law_not_found_claim', $result['changes']);
+    }
+
+    public function test_it_replaces_personal_data_articles_not_found_source_line_with_retrieved_articles(): void
+    {
+        $answer = '- **წყარო:** პერსონალურ მონაცემთა დაცვის შესახებ სპეციალური კანონი (მუხლები მოძიებული არ არის, მაგრამ მისი გამოყენება სავალდებულოა)';
+
+        $result = (new AnswerPostProcessorService())->process($answer, [
+            'matsneResults' => [
+                [
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    '_article_num' => 17,
+                    'excerpt' => 'მუხლი 17. მონაცემთა უსაფრთხოება.',
+                ],
+                [
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    '_article_num' => 43,
+                    'excerpt' => 'მუხლი 43. საზედამხედველო ღონისძიებები.',
+                ],
+            ],
+        ]);
+
+        $this->assertStringContainsString('- **წყარო:** „პერსონალურ მონაცემთა დაცვის შესახებ“ კანონი, მუხლები 17, 43', $result['text']);
+        $this->assertStringNotContainsString('მუხლები მოძიებული არ არის', $result['text']);
+        $this->assertContains('corrected_personal_data_law_not_found_claim', $result['changes']);
+    }
+
+    public function test_it_softens_personal_data_fine_only_legal_person_overstatement(): void
+    {
+        $answer = 'მონაცემთა გაჟონვაზე პასუხისმგებელია კომპანია. ადმინისტრაციული ჯარიმის დაკისრება შესაძლებელია მხოლოდ იურიდიულ პირზე.';
+
+        $result = (new AnswerPostProcessorService())->process($answer, [
+            'matsneResults' => [
+                [
+                    'title' => 'პერსონალურ მონაცემთა დაცვის შესახებ',
+                    '_article_num' => 55,
+                    'excerpt' => 'მუხლი 55. ადმინისტრაციული პასუხისმგებლობა.',
+                ],
+            ],
+        ]);
+
+        $this->assertStringContainsString('ჯარიმის ადრესატი განისაზღვრება', $result['text']);
+        $this->assertStringContainsString('ავტომატური გადაკისრება დაუშვებელია', $result['text']);
+        $this->assertStringNotContainsString('მხოლოდ იურიდიულ პირზე', $result['text']);
+        $this->assertContains('softened_personal_data_fine_transfer_claim', $result['changes']);
+    }
 }

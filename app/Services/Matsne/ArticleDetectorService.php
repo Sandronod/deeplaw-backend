@@ -2,6 +2,7 @@
 
 namespace App\Services\Matsne;
 
+use App\Services\Legal\LegalNormCoveragePlannerService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -16,6 +17,7 @@ class ArticleDetectorService
 {
     public function __construct(
         private readonly CanonicalLawResolverService $lawResolver,
+        private readonly ?LegalNormCoveragePlannerService $normCoveragePlanner = null,
     ) {}
 
     /**
@@ -161,8 +163,16 @@ class ArticleDetectorService
         $lower = mb_strtolower($text);
         $hasLaborDomain = (bool) array_intersect($domains, ['labor']);
         $hasCivilDomain = (bool) array_intersect($domains, ['civil', 'civil_law', 'property', 'corporate']);
+        $hasFamilyDomain = (bool) array_intersect($domains, ['family']);
 
         $refs = [];
+
+        if ($this->normCoveragePlanner !== null) {
+            $refs = array_merge(
+                $refs,
+                $this->normCoveragePlanner->articleRefs($text, $domains),
+            );
+        }
 
         if ($hasLaborDomain) {
             $terminationSignals = [
@@ -183,6 +193,18 @@ class ArticleDetectorService
                     ['num' => 48, 'code' => 'შრომის კოდექს'],
                 ]);
                 break;
+            }
+
+            if ($this->containsAny($lower, ['არაკონკურენც', 'კონკურენტ კომპანი', 'კონკურენტი დამსაქმებელ', 'შეთავსებით სამუშაო'])) {
+                $refs = array_merge($refs, [
+                    ['num' => 16, 'code' => 'შრომის კოდექს'],
+                    ['num' => 46, 'code' => 'შრომის კოდექს'],
+                    ['num' => 60, 'code' => 'შრომის კოდექს'],
+                ]);
+            }
+
+            if ($this->containsAny($lower, ['ზიან', 'მატერიალურ პასუხისმგებლ', 'ბრალეულ', 'მიზეზობრივ'])) {
+                $refs[] = ['num' => 44, 'code' => 'შრომის კოდექს'];
             }
         }
 
@@ -231,6 +253,126 @@ class ArticleDetectorService
                 $refs[] = ['num' => 129, 'code' => 'სკ'];
                 $refs[] = ['num' => 130, 'code' => 'სკ'];
             }
+
+            if ($this->containsAny($lower, ['პირგასამტეხლ', 'contractual penalty'])) {
+                $refs[] = ['num' => 417, 'code' => 'სკ'];
+                $refs[] = ['num' => 420, 'code' => 'სკ'];
+            }
+
+            if ($this->containsAny($lower, ['ზიან', 'ანაზღაურებ', 'მიზეზობრივ', 'უშუალო შედეგ', 'მორალურ', 'რეპუტაციულ'])) {
+                $refs[] = ['num' => 408, 'code' => 'სკ'];
+                $refs[] = ['num' => 412, 'code' => 'სკ'];
+                $refs[] = ['num' => 413, 'code' => 'სკ'];
+                $refs[] = ['num' => 415, 'code' => 'სკ'];
+            }
+        }
+
+        if ($hasCivilDomain && $this->containsAny($lower, [
+            'საჯარო რეესტრ',
+            'დაურეგისტრირ',
+            'რეგისტრაცია დასრულებული',
+            'წინასწარი ნასყიდ',
+            'უძრავ ნივთ',
+            'უძრავი ქონებ',
+            'ბინის საკუთრ',
+            'საკუთრების რეგისტრ',
+        ])) {
+            $refs = array_merge($refs, [
+                ['num' => 183, 'code' => 'სკ'],
+                ['num' => 185, 'code' => 'სკ'],
+                ['num' => 214, 'code' => 'სკ'],
+                ['num' => 311, 'code' => 'სკ'],
+                ['num' => 312, 'code' => 'სკ'],
+                ['num' => 323, 'code' => 'სკ'],
+            ]);
+        }
+
+        if ($this->containsAny($lower, ['იპოთეკ', 'იპოთეკარ', 'უზრუნველყოფის უფლება', 'ქონების რეალიზაცი', 'ბანკის სასარგებლოდ დაიტვირთ'])) {
+            $refs = array_merge($refs, [
+                ['num' => 286, 'code' => 'სკ'],
+                ['num' => 287, 'code' => 'სკ'],
+                ['num' => 290, 'code' => 'სკ'],
+                ['num' => 297, 'code' => 'სკ'],
+                ['num' => 300, 'code' => 'სკ'],
+                ['num' => 301, 'code' => 'სკ'],
+                ['num' => 302, 'code' => 'სკ'],
+            ]);
+        }
+
+        if ($this->containsAny($lower, ['გადახდისუუნარ', 'გაკოტრ', 'კრედიტორთა რეესტრ', 'კრედიტორის სტატუს', 'ჩვეულებრივი კრედიტორ'])) {
+            $refs = array_merge($refs, [
+                ['num' => 1, 'code' => 'რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ'],
+                ['num' => 3, 'code' => 'რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ'],
+                ['num' => 5, 'code' => 'რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ'],
+                ['num' => 6, 'code' => 'რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ'],
+                ['num' => 52, 'code' => 'რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ'],
+            ]);
+        }
+
+        if (($hasFamilyDomain || $this->containsAny($lower, ['მემკვიდრ', 'სამკვიდრ', 'გარდაიცვალ']))
+            && $this->containsAny($lower, ['მემკვიდრ', 'სამკვიდრ', 'გარდაიცვალ', 'მეუღლე', 'შვილი', 'ძმა'])
+        ) {
+            $refs = array_merge($refs, [
+                ['num' => 1306, 'code' => 'სკ'],
+                ['num' => 1307, 'code' => 'სკ'],
+                ['num' => 1319, 'code' => 'სკ'],
+                ['num' => 1320, 'code' => 'სკ'],
+                ['num' => 1328, 'code' => 'სკ'],
+                ['num' => 1336, 'code' => 'სკ'],
+                ['num' => 1339, 'code' => 'სკ'],
+            ]);
+        }
+
+        if ($this->containsAny($lower, ['მეუღლეთა საერთო', 'მეუღლეთა თანასაკუთრ', 'ქორწინების განმავლობაში შეძენ', 'ერთობლივი საკუთრ', 'მეუღლე აცხადებს', 'მეუღლეთა ქონ'])) {
+            $refs = array_merge($refs, [
+                ['num' => 1158, 'code' => 'სკ'],
+                ['num' => 1160, 'code' => 'სკ'],
+                ['num' => 1161, 'code' => 'სკ'],
+                ['num' => 1163, 'code' => 'სკ'],
+                ['num' => 1171, 'code' => 'სკ'],
+            ]);
+        }
+
+        if ($this->containsAny($lower, ['თაღლით', 'სისხლის სამართლის', 'განაჩენ', 'პრეიუდიც'])) {
+            $refs[] = ['num' => 106, 'code' => 'სსკ'];
+        }
+
+        if ($this->containsAny($lower, ['მტკიცების ტვირთ', 'ვინ უნდა დაამტკიც', 'კეთილსინდისიერება დაამტკიც', 'ბანკის ცოდნა'])) {
+            $refs[] = ['num' => 102, 'code' => 'სსკ'];
+        }
+
+        if ($this->containsAny($lower, ['კოლექტიური სარჩელ', 'ერთობლივი სარჩელ', 'რამდენიმე მოსარჩელ', '240 მყიდველ', 'ერთად სარჩელ'])) {
+            $refs[] = ['num' => 86, 'code' => 'სსკ'];
+        }
+
+        if ($this->containsAny($lower, ['პერსონალურ მონაცემ', 'მონაცემთა გაჟონ', 'მონაცემთა დაცვ', 'api', 'მომხმარებელთა მონაცემ'])) {
+            $refs = array_merge($refs, [
+                ['num' => 2, 'code' => 'პერსონალურ მონაცემთა დაცვის შესახებ'],
+                ['num' => 16, 'code' => 'პერსონალურ მონაცემთა დაცვის შესახებ'],
+                ['num' => 17, 'code' => 'პერსონალურ მონაცემთა დაცვის შესახებ'],
+                ['num' => 39, 'code' => 'პერსონალურ მონაცემთა დაცვის შესახებ'],
+                ['num' => 43, 'code' => 'პერსონალურ მონაცემთა დაცვის შესახებ'],
+                ['num' => 55, 'code' => 'პერსონალურ მონაცემთა დაცვის შესახებ'],
+            ]);
+        }
+
+        if ($this->containsAny($lower, [
+            'ადმინისტრაციული წარმოება',
+            'ადმინისტრაციული გადაწყვეტილება',
+            'ადმინისტრაციული აქტი',
+            'ადმინისტრაციული ჯარიმა',
+            'სასამართლო კონტროლ',
+            'გასაჩივრ',
+            'მონაცემთა დაცვის სამსახურ',
+        ])) {
+            $refs = array_merge($refs, [
+                ['num' => 22, 'code' => 'ადმ.საპ'],
+                ['num' => 24, 'code' => 'ადმ.საპ'],
+                ['num' => 32, 'code' => 'ადმ.საპ'],
+                ['num' => 34, 'code' => 'ადმ.საპ'],
+                ['num' => 60, 'code' => 'ზაკ'],
+                ['num' => 96, 'code' => 'ზაკ'],
+            ]);
         }
 
         return array_values(array_unique($refs, SORT_REGULAR));

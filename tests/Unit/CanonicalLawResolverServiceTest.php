@@ -25,6 +25,9 @@ class CanonicalLawResolverServiceTest extends TestCase
             ['ადმ.საპ', 'admin_procedure_code'],
             ['შრ.კოდ', 'labor_code'],
             ['შრომის კოდექს', 'labor_code'],
+            ['პერსონალურ მონაცემთა დაცვის შესახებ', 'personal_data_law'],
+            ['გადახდისუუნარობის შესახებ', 'insolvency_law'],
+            ['რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ', 'insolvency_law'],
         ];
     }
 }

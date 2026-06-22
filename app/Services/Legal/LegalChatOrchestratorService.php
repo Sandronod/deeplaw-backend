@@ -336,10 +336,11 @@ class LegalChatOrchestratorService
                             }
                         }
 
-                        // Cap: article_detector(0.95) > semantic(similarity) — top 6
-                        if (count($matsneResults) > 6) {
+                        // Cap: article_detector(0.95) > semantic(similarity). Full casus needs wider statutory coverage.
+                        $normLimit = $this->normResultLimit($triageResult);
+                        if (count($matsneResults) > $normLimit) {
                             usort($matsneResults, fn($a, $b) => $b['similarity'] <=> $a['similarity']);
-                            $matsneResults = array_slice($matsneResults, 0, 6);
+                            $matsneResults = array_slice($matsneResults, 0, $normLimit);
                         }
 
                         Log::info('Orchestrator: semantic article retriever injected', [
@@ -714,6 +715,7 @@ class LegalChatOrchestratorService
 - არ ახსენო validator, შემოწმება, წინა პასუხი ან ეს ინსტრუქცია.
 - არ მოიგონო მუხლი, ვადა, თანხა, საქმე ან სასამართლო პრაქტიკა.
 - თუ მუხლი/ვადა/თანხა წყაროებში არ ჩანს, თქვი რომ მოძიებული წყაროებით დადასტურებული არ არის.
+- თუ წინა პრობლემა ეხება ბუნდოვან წყაროს, წყაროს ხაზში ჩასვი კონკრეტული კანონი + მუხლი CONTEXT-იდან; არ დაწერო მხოლოდ კოდექსის სახელი ან „მუხლები მოძიებული არ არის“.
 - თუ ზღვრული პირობაა, ზუსტად განმარტე შედის თუ არა ტოლი მნიშვნელობა ზღვარში.
 - საბოლოო პასუხი დაიწყე მოკლე დასკვნით.
 PROMPT;
@@ -1070,6 +1072,18 @@ PROMPT;
         }
 
         return empty($this->extractableRuleDocs($matsneResults));
+    }
+
+    private function normResultLimit(TriageResult $triage): int
+    {
+        $isComplex = $triage->complexityLevel === 'full'
+            || $triage->issueList->issueCount >= 4
+            || count($triage->domains) >= 3;
+
+        $configKey = $isComplex ? 'openai.max_matsne_context_results_complex' : 'openai.max_matsne_context_results';
+        $fallback = $isComplex ? 10 : 6;
+
+        return max(1, (int) config($configKey, $fallback));
     }
 
     private function shouldExtractRules(TriageResult $triage, string $userQuestion, array $matsneResults): bool

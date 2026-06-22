@@ -64,6 +64,60 @@ class LegalQueryNormalizerService
             'rule_triggers' => ['civil_procedure.limitation_period_guard'],
             'outcome_categories' => ['procedural_outcome.deadline'],
         ],
+        [
+            'id' => 'labor.non_compete',
+            'any' => ['არაკონკურენც', 'კონკურენტ კომპანი', 'კონკურენტი დამსაქმებელ', 'შეთავსებით სამუშაო'],
+            'terms' => ['არაკონკურენციის შეთანხმება', 'შრომის კოდექსი 60', 'შრომითი ხელშეკრულებით გათვალისწინებული შეზღუდვები', 'კონკურენტი დამსაქმებელი'],
+            'outcome_categories' => ['substantive_outcome.employment_restriction'],
+        ],
+        [
+            'id' => 'civil.penalty_reduction',
+            'any' => ['პირგასამტეხლ'],
+            'terms' => ['პირგასამტეხლო', 'პირგასამტეხლოს შემცირება', 'სამოქალაქო კოდექსი 420', 'შეუსაბამოდ მაღალი პირგასამტეხლო'],
+            'outcome_categories' => ['substantive_outcome.penalty_reduction'],
+        ],
+        [
+            'id' => 'privacy.personal_data_incident',
+            'any' => ['პერსონალურ მონაცემ', 'მონაცემთა გაჟონ', 'მონაცემთა დაცვ', 'მომხმარებელთა მონაცემ'],
+            'terms' => ['პერსონალურ მონაცემთა დაცვის შესახებ', 'მონაცემთა უსაფრთხოება', 'მონაცემთა დამმუშავებელი', 'უფლებამოსილი პირი', 'ადმინისტრაციული პასუხისმგებლობა'],
+            'outcome_categories' => ['administrative_outcome.personal_data_sanction'],
+        ],
+        [
+            'id' => 'civil.damages_causation',
+            'any' => ['მიზეზობრივ', 'ზიანის ოდენობ', 'ზიანის ანაზღაურებ', 'მორალურ ზიან', 'რეპუტაციულ ზიან'],
+            'terms' => ['ზიანის ანაზღაურება', 'მიზეზობრივი კავშირი', 'ბრალეულობა', 'ზიანის ოდენობის მტკიცება', 'მორალური ზიანი'],
+            'outcome_categories' => ['substantive_outcome.damages'],
+        ],
+        [
+            'id' => 'property.real_estate_registration_priority',
+            'any' => ['საჯარო რეესტრ', 'დაურეგისტრირ', 'რეგისტრაცია დასრულებული', 'წინასწარი ნასყიდ', 'ბინის საკუთრ', 'უძრავი ქონება'],
+            'terms' => ['უძრავ ნივთზე საკუთრების რეგისტრაცია', 'საჯარო რეესტრის პრეზუმფცია', 'სკ 183', 'სკ 312', 'წინასწარი ნასყიდობის ვალდებულებითი მოთხოვნა'],
+            'outcome_categories' => ['substantive_outcome.property_status'],
+        ],
+        [
+            'id' => 'property.mortgage_priority_enforcement',
+            'any' => ['იპოთეკ', 'იპოთეკარ', 'უზრუნველყოფის უფლება', 'ქონების რეალიზაცი', 'ბანკის სასარგებლოდ დაიტვირთ'],
+            'terms' => ['იპოთეკის პრიორიტეტი', 'იპოთეკის რიგითობა', 'სკ 286', 'სკ 290', 'სკ 300', 'იპოთეკით დატვირთული ნივთის რეალიზაცია'],
+            'outcome_categories' => ['substantive_outcome.security_interest_priority'],
+        ],
+        [
+            'id' => 'insolvency.creditor_status',
+            'any' => ['გადახდისუუნარ', 'გაკოტრ', 'კრედიტორების სტატუს', 'კრედიტორთა რეესტრ', 'ჩვეულებრივი კრედიტორ'],
+            'terms' => ['რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ', 'კრედიტორული მოთხოვნა', 'უზრუნველყოფილი კრედიტორი', 'არაუზრუნველყოფილი კრედიტორი', 'კრედიტორთა რეესტრი'],
+            'outcome_categories' => ['procedural_outcome.insolvency_claim_status'],
+        ],
+        [
+            'id' => 'family.inheritance_marital_property',
+            'any' => ['მემკვიდრ', 'სამკვიდრ', 'გარდაიცვალ', 'მეუღლე აცხადებს', 'მეუღლეთა საერთო', 'მეუღლეთა თანასაკუთრ'],
+            'terms' => ['სამკვიდრო ქონება', 'კანონით მემკვიდრეები', 'ცოცხლად დარჩენილი მეუღლის წილი', 'მეუღლეთა თანასაკუთრება', 'სკ 1328', 'სკ 1336', 'სკ 1339', 'სკ 1158'],
+            'outcome_categories' => ['substantive_outcome.inheritance_status', 'substantive_outcome.marital_property'],
+        ],
+        [
+            'id' => 'civil_procedure.preclusion_burden_joinder',
+            'any' => ['სისხლის სამართლის გავლენა', 'თაღლითობის საქმ', 'განაჩენი', 'პრეიუდიც', 'მტკიცების ტვირთ', 'კოლექტიური სარჩელ', 'ერთობლივი სარჩელ', 'რამდენიმე მოსარჩელ'],
+            'terms' => ['სსკ 106', 'სსკ 102', 'სსკ 86', 'პრეიუდიციული ფაქტები', 'მტკიცების ტვირთი', 'საპროცესო თანამონაწილეობა'],
+            'outcome_categories' => ['procedural_outcome.preclusion', 'procedural_outcome.proof_burden', 'procedural_outcome.joinder'],
+        ],
     ];
 
     public function __construct(

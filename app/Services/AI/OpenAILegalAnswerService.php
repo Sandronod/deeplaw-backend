@@ -31,6 +31,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         private readonly LegalRuleExtractorService  $ruleExtractor,
         private readonly LegalRemedyGuardService    $remedyGuard,
         private readonly LegalConsequenceTaxonomyService $consequenceTaxonomy,
+        private readonly LegalSourceCoverageGuardService $sourceCoverageGuard,
     ) {
         $this->apiKey      = config('openai.api_key');
         $this->model       = config('openai.chat_model', 'gpt-4.1');
@@ -71,13 +72,14 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         ?TriageResult   $triage = null,
         array           $extractedRules = [],
     ): string {
+        $model = $this->modelForRequest($userQuestion, $mode, $triage, $issueList);
         $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion, $triage);
         $rulesBlock   = $this->ruleExtractor->buildPromptBlock($extractedRules);
         $remedyBlock  = $this->remedyGuard->buildPromptBlock($userQuestion, $matsneResults, $decisions, $triage);
         $contextBlock = implode("\n\n", array_filter([
             $rulesBlock,
             $remedyBlock,
-            $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults),
+            $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults, $triage),
         ]));
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
@@ -89,7 +91,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
                 ->withToken($this->apiKey)
                 ->timeout($this->timeout)
                 ->post("{$this->baseUrl}/chat/completions", [
-                    'model'       => $this->model,
+                    'model'       => $model,
                     'messages'    => $messages,
                     'max_tokens'  => $this->maxTokens,
                     'temperature' => $this->temperature,
@@ -111,7 +113,8 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
                 'prompt_tokens'     => $data['usage']['prompt_tokens']     ?? null,
                 'completion_tokens' => $data['usage']['completion_tokens'] ?? null,
                 'total_tokens'      => $data['usage']['total_tokens']      ?? null,
-                'model'             => $this->model,
+                'model'             => $model,
+                'default_model'     => $this->model,
                 'mode'              => $mode,
                 'confidence'        => $confidence->label,
             ]);
@@ -133,6 +136,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         $glossaryBlock      = $userQuestion ? $this->glossary->buildPromptBlock($userQuestion, 8) : '';
         $domainContext      = $this->buildDomainContextBlock($triage);
         $statutoryRules     = $this->buildStatutoryRulesBlock($triage, $userQuestion);
+        $sourceCoverage     = $this->sourceCoverageGuard->buildPromptBlock($userQuestion, $triage, $issueList);
         $responseBudget     = $this->buildResponseBudgetInstruction($mode, $triage);
 
         return <<<PROMPT
@@ -143,6 +147,8 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
 {$domainContext}
 
 {$statutoryRules}
+
+{$sourceCoverage}
 
 ────────────────────────
 🧠 CORE PRINCIPLE
@@ -259,6 +265,7 @@ ACTIVE MODE instruction (ქვემოთ) თუ სხვა სტრუქ
 
    📕 **მაცნე / კანონმდებლობა** (თუ CONTEXT-ში matsne/law დოკუმენტები მოიძებნა):
       - ჩამოთვალე: სათაური | ტიპი | სტატუსი
+      - თუ CONTEXT-ში article_detector/concept_detector-ით ამოსულია კონკრეტული მუხლი, წყაროში აუცილებლად დაწერე კანონი + მუხლის ნომერი; არ დაწერო მხოლოდ „სამოქალაქო კოდექსი“, „შრომის კოდექსი“ ან „მუხლები მოძიებული არ არის“.
       - შესაბამისი ნაწილი მოკლედ
       - 🔗 ლინკი
 
@@ -599,7 +606,7 @@ MANDATORY სტრუქტურა:
 **3. 🔍 ანალიზი** — თითოეული საკითხი ცალ-ცალკე:
 
    **[საკითხი 1-ის სახელი]:**
-   - 📕 კანონი/ნორმა: [CONTEXT-ის matsne ან 💡 ზოგადი — მიუთითე წყარო]
+   - 📕 კანონი/ნორმა: [CONTEXT-ის matsne კანონი + მუხლი; არ დატოვო მხოლოდ კოდექსის სახელად და არ დაწერო „მუხლები მოძიებული არ არის“, თუ CONTEXT-ში მუხლებია]
    - ⚖️ სასამართლო პრაქტიკა: [CONTEXT-ის case ან "📌 ბაზაში ვერ მოიძებნა"]
    - → დასკვნა ამ საკითხზე: [კონკრეტული პოზიცია]
 
@@ -753,6 +760,17 @@ INST,
         return $this->contextConfigLimit($configKey, $isComplexMode ? 5 : 3);
     }
 
+    private function matsneContextLimit(string $mode, ?TriageResult $triage): int
+    {
+        $isComplex = in_array($mode, ['advocate', 'compare', 'summarize', 'find'], true)
+            || ($triage?->complexityLevel === 'full')
+            || (($triage?->issueList->issueCount ?? 0) >= 4);
+
+        return $isComplex
+            ? $this->contextConfigLimit('openai.max_matsne_context_results_complex', 10)
+            : $this->contextConfigLimit('openai.max_matsne_context_results', 4);
+    }
+
     private function contextConfigLimit(string $key, int $fallback): int
     {
         return max(0, (int) config($key, $fallback));
@@ -760,13 +778,13 @@ INST,
 
     // ── Context Block ─────────────────────────────────────────────────────────
 
-    private function buildContextBlock(array $decisions, int $totalFound = 0, string $mode = 'explain', array $lawResults = [], array $echrResults = [], array $matsneResults = [], array $euResults = [], array $germanResults = [], array $constCourtResults = []): string
+    private function buildContextBlock(array $decisions, int $totalFound = 0, string $mode = 'explain', array $lawResults = [], array $echrResults = [], array $matsneResults = [], array $euResults = [], array $germanResults = [], array $constCourtResults = [], ?TriageResult $triage = null): string
     {
         $parts = [];
 
         $decisions         = array_slice($decisions, 0, $this->contextDecisionLimit($mode));
         $lawResults        = array_slice($lawResults, 0, $this->contextConfigLimit('openai.max_law_context_results', 4));
-        $matsneResults     = array_slice($matsneResults, 0, $this->contextConfigLimit('openai.max_matsne_context_results', 4));
+        $matsneResults     = array_slice($matsneResults, 0, $this->matsneContextLimit($mode, $triage));
         $echrResults       = array_slice($echrResults, 0, $this->contextConfigLimit('openai.max_echr_context_results', 2));
         $euResults         = array_slice($euResults, 0, $this->contextConfigLimit('openai.max_eu_context_results', 2));
         $germanResults     = array_slice($germanResults, 0, $this->contextConfigLimit('openai.max_german_context_results', 2));
@@ -1286,10 +1304,14 @@ BLOCK;
         array           $extractedRules = [],
     ): \Generator {
         set_time_limit(0);
+        $model = $this->modelForRequest($userQuestion, $mode, $triage, $issueList);
 
         Log::info('OpenAILegalAnswerService: streamTokens called', [
-            'model' => $this->model,
-            'mode'  => $mode,
+            'model' => $model,
+            'default_model' => $this->model,
+            'mode' => $mode,
+            'complexity_level' => $triage?->complexityLevel,
+            'complexity_score' => $triage?->complexityScore,
         ]);
 
         $systemPrompt = $this->buildSystemPrompt($mode, $confidence, $sources, !empty($matsneResults), $issueList, $userQuestion, $triage);
@@ -1298,7 +1320,7 @@ BLOCK;
         $contextBlock = implode("\n\n", array_filter([
             $rulesBlock,
             $remedyBlock,
-            $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults),
+            $this->buildContextBlock($decisions, $totalFound, $mode, $lawResults, $echrResults, $matsneResults, $euResults, $germanResults, $constCourtResults, $triage),
         ]));
         $messages     = $this->buildMessages($systemPrompt, $contextBlock, $historyMessages, $userQuestion);
 
@@ -1311,7 +1333,7 @@ BLOCK;
                 'Accept'        => 'text/event-stream',
             ],
             'json' => [
-                'model'       => $this->model,
+                'model'       => $model,
                 'messages'    => $messages,
                 'max_tokens'  => $this->maxTokens,
                 'temperature' => $this->temperature,
@@ -1354,6 +1376,57 @@ BLOCK;
                 }
             }
         }
+    }
+
+    private function modelForRequest(
+        string $userQuestion,
+        string $mode,
+        ?TriageResult $triage = null,
+        ?IssueList $issueList = null,
+    ): string {
+        $defaultModel = (string) config('openai.chat_model', $this->model);
+
+        if (!(bool) config('openai.dynamic_chat_model_enabled', true)) {
+            return $defaultModel;
+        }
+
+        $complexModel = (string) config('openai.complex_chat_model', 'gpt-4.1');
+        if ($complexModel === '') {
+            return $defaultModel;
+        }
+
+        return $this->shouldUseComplexAnswerModel($userQuestion, $mode, $triage, $issueList)
+            ? $complexModel
+            : $defaultModel;
+    }
+
+    private function shouldUseComplexAnswerModel(
+        string $userQuestion,
+        string $mode,
+        ?TriageResult $triage = null,
+        ?IssueList $issueList = null,
+    ): bool {
+        $scoreThreshold = (int) config('openai.complex_model_min_score', 61);
+        $charThreshold = (int) config('openai.complex_model_min_chars', 700);
+
+        if (($triage?->complexityLevel) === 'full') {
+            return true;
+        }
+
+        if (($triage?->complexityScore ?? 0) >= $scoreThreshold) {
+            return true;
+        }
+
+        if (mb_strlen(trim($userQuestion)) >= $charThreshold) {
+            return true;
+        }
+
+        if (($issueList?->isComplex ?? false) || ($issueList?->issueCount ?? 0) >= 3) {
+            return true;
+        }
+
+        return in_array($mode, ['advocate', 'compare'], true)
+            && mb_strlen(trim($userQuestion)) >= 300;
     }
 
     // ── Message Assembly ──────────────────────────────────────────────────────

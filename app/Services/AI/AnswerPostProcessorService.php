@@ -20,6 +20,9 @@ class AnswerPostProcessorService
         $changes = [];
 
         $answerText = $this->normalizeDefectNoticeTerminology($answerText, $changes);
+        $answerText = $this->removeIrrelevantArticle55Mentions($answerText, $ctx['userQuestion'] ?? '', $changes);
+        $answerText = $this->correctPersonalDataLawNotFoundClaim($answerText, $ctx['matsneResults'] ?? [], $changes);
+        $answerText = $this->softenPersonalDataFineTransferClaim($answerText, $ctx['matsneResults'] ?? [], $changes);
         $answerText = $this->injectArticle55IfGrounded($answerText, $ctx['matsneResults'] ?? [], $changes);
         $answerText = $this->softenWeakCourtPracticeClaims(
             $answerText,
@@ -65,6 +68,161 @@ class AnswerPostProcessorService
     }
 
     /**
+     * @param array<int, string> $changes
+     */
+    private function removeIrrelevantArticle55Mentions(string $text, string $question, array &$changes): string
+    {
+        if (!$this->mentionsArticle($text, 55)) {
+            return $text;
+        }
+
+        $questionLower = mb_strtolower($question);
+        if ($this->containsAny($questionLower, [
+            'დისპროპორც',
+            'შეუსაბამ',
+            'ამორალ',
+            'ზნეობ',
+            'საბაზრო ღირებულ',
+            'ფასი',
+            'ღირებულება',
+        ])) {
+            return $text;
+        }
+
+        $original = $text;
+        $lines = preg_split('/\R/u', $text) ?: [$text];
+        $kept = [];
+
+        foreach ($lines as $line) {
+            $lower = mb_strtolower($line);
+            if ($this->containsAny($lower, ['მუხლი 55', '55-ე მუხლ', 'სკ-ის 55', 'სკ 55'])) {
+                continue;
+            }
+
+            $kept[] = $line;
+        }
+
+        $text = implode("\n", $kept);
+        $text = preg_replace("/\n{3,}/u", "\n\n", $text) ?? $text;
+
+        if ($text !== $original) {
+            $changes[] = 'removed_irrelevant_article_55';
+        }
+
+        return $text;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $matsneResults
+     * @param array<int, string> $changes
+     */
+    private function correctPersonalDataLawNotFoundClaim(string $text, array $matsneResults, array &$changes): string
+    {
+        if (!$this->hasPersonalDataLaw($matsneResults)) {
+            return $text;
+        }
+
+        $updated = $text;
+
+        $updated = preg_replace_callback(
+            '/^(\s*-\s*\*\*(?:კანონი|წყარო):\*\*\s*)[^\n]*(?:პერსონალურ მონაცემთა დაცვის შესახებ|მონაცემთა დაცვის შესახებ)[^\n]*(?:არ\s+(?:მოიძებნა|იძებნება|არის\s+დადასტურებული|არის\s+პირდაპირ\s+დადასტურებული)|მუხლები\s+მოძიებული\s+არ\s+არის|მუხლი\s+მოძიებული\s+არ\s+არის|„„|\);\s*შრომის\s+კოდექსი,\s*მუხლი\s*60)[^\n]*$/mu',
+            fn (array $matches): string => $matches[1] . $this->personalDataLawText($matsneResults),
+            $updated,
+        ) ?? $updated;
+
+        $updated = preg_replace(
+            '/^\s*-\s*(?!\*\*(?:კანონი|წყარო):\*\*)[^\n]*(?:პერსონალურ მონაცემთა დაცვის შესახებ|მონაცემთა დაცვის შესახებ)[^\n]*(?:არ\s+(?:იძებნება|მოიძებნა|არის\s+დადასტურებული|არის\s+პირდაპირ\s+დადასტურებული)|მუხლები\s+მოძიებული\s+არ\s+არის|მუხლი\s+მოძიებული\s+არ\s+არის)[^\n]*$/mu',
+            '- ' . $this->personalDataSourceText($matsneResults),
+            $updated,
+        ) ?? $updated;
+
+        $updated = preg_replace(
+            '/(?:სპეციალური ნორმა\s+)?პერსონალურ მონაცემთა დაცვის შესახებ(?:\s+კანონის მიხედვით)?[^.\n]{0,220}(?:არ მოიძებნა|არ იძებნება|არ არის დადასტურებული|არ არის პირდაპირ დადასტურებული|მუხლები მოძიებული არ არის|მუხლი მოძიებული არ არის)\.?/u',
+            $this->personalDataLawText($matsneResults),
+            $updated,
+        ) ?? $updated;
+
+        if ($updated !== $text) {
+            $changes[] = 'corrected_personal_data_law_not_found_claim';
+        }
+
+        return $updated;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $matsneResults
+     */
+    private function personalDataLawText(array $matsneResults = []): string
+    {
+        $articleText = $this->personalDataArticleText($matsneResults);
+
+        return '„პერსონალურ მონაცემთა დაცვის შესახებ“ კანონი' . $articleText . ' არის სპეციალური წყარო: მონაცემთა გაჟონვის საკითხზე უნდა შეფასდეს მონაცემთა დამმუშავებელი/უფლებამოსილი პირი, მონაცემთა უსაფრთხოების ვალდებულება, საზედამხედველო ღონისძიებები და ადმინისტრაციული პასუხისმგებლობა.';
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $matsneResults
+     */
+    private function personalDataSourceText(array $matsneResults = []): string
+    {
+        return '„პერსონალურ მონაცემთა დაცვის შესახებ“ კანონი' . $this->personalDataArticleText($matsneResults) . ' — გამოიყენება მონაცემთა უსაფრთხოების, დამმუშავებლის/უფლებამოსილი პირის და ადმინისტრაციული პასუხისმგებლობის საკითხებზე.';
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $matsneResults
+     */
+    private function personalDataArticleText(array $matsneResults): string
+    {
+        $articles = [];
+
+        foreach ($matsneResults as $result) {
+            $title = mb_strtolower((string) ($result['title'] ?? ''));
+            $text = mb_strtolower((string) ($result['excerpt'] ?? '') . "\n" . (string) ($result['content'] ?? ''));
+
+            if (!str_contains($title, 'პერსონალურ მონაცემთა დაცვის შესახებ')
+                && !str_contains($text, 'პერსონალურ მონაცემთა დაცვის შესახებ')
+            ) {
+                continue;
+            }
+
+            foreach (['_article_num', 'article_num'] as $key) {
+                if (isset($result[$key]) && preg_match('/\d{1,4}/', (string) $result[$key], $match)) {
+                    $articles[] = (int) $match[0];
+                }
+            }
+        }
+
+        $articles = array_values(array_unique(array_filter($articles)));
+        sort($articles);
+
+        return empty($articles)
+            ? ''
+            : ', მუხლები ' . implode(', ', $articles);
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $matsneResults
+     * @param array<int, string> $changes
+     */
+    private function softenPersonalDataFineTransferClaim(string $text, array $matsneResults, array &$changes): string
+    {
+        if (!$this->hasPersonalDataLaw($matsneResults)) {
+            return $text;
+        }
+
+        $updated = preg_replace(
+            '/ადმინისტრაციული\s+ჯარიმის\s+დაკისრება\s+შესაძლებელია\s+მხოლოდ\s+იურიდიულ\s+პირზე/u',
+            'ადმინისტრაციული ჯარიმის ადრესატი განისაზღვრება „პერსონალურ მონაცემთა დაცვის შესახებ“ კანონით; თანამშრომელზე მისი ავტომატური გადაკისრება დაუშვებელია და ცალკე რეგრესულ/მატერიალური პასუხისმგებლობის საფუძველს მოითხოვს',
+            $text,
+        ) ?? $text;
+
+        if ($updated !== $text) {
+            $changes[] = 'softened_personal_data_fine_transfer_claim';
+        }
+
+        return $updated;
+    }
+
+    /**
      * @param array<int, array<string, mixed>> $matsneResults
      * @param array<int, string> $changes
      */
@@ -97,6 +255,25 @@ class AnswerPostProcessorService
         }
 
         return $text;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $docs
+     */
+    private function hasPersonalDataLaw(array $docs): bool
+    {
+        foreach ($docs as $doc) {
+            $title = mb_strtolower((string) ($doc['title'] ?? ''));
+            $text = mb_strtolower((string) ($doc['excerpt'] ?? '') . "\n" . (string) ($doc['content'] ?? ''));
+
+            if (str_contains($title, 'პერსონალურ მონაცემთა დაცვის შესახებ')
+                || str_contains($text, 'პერსონალურ მონაცემთა დაცვის შესახებ')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

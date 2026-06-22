@@ -1,10 +1,38 @@
 # RAG / Legal QA Roadmap
 
-Last updated: 2026-06-11
+Last updated: 2026-06-22
 
 This note is the handoff context for continuing work on the Georgian Legal AI Chat project in a new session.
 
 Current focus: legal question answering, source retrieval, norm retrieval, court decision matching, answer grounding, evaluator quality, and latency. Security, chat ownership, and account/permission topics are intentionally out of scope for this phase.
+
+## Current Status - 2026-06-22
+
+Latest large-casus hardening:
+
+- Added the first config-backed Legal Issue -> Norm Map:
+  - `config/legal_issue_norms.php` now maps reusable legal issues to triggers, required law/article refs, must-discuss points, forbidden shortcuts, and boundary rules
+  - `LegalIssueNormMapService` matches questions/facts/domains against this registry
+  - `LegalNormCoveragePlannerService` converts matched issues into ArticleDetector-compatible Matsne article refs
+  - `ArticleDetectorService` now merges registry-planned article refs with the older hardcoded concept fallback, so existing behavior is preserved while new norm routing can grow from config
+  - Initial mapped issues include magistrate claim value, counterclaim subject-matter guard, real-estate registration, mortgage priority/enforcement, insolvency creditor status, inheritance/marital property, personal-data incidents, administrative review, labor termination/non-compete/material liability, damages, penalty reduction, criminal preclusion, proof burden, and procedural joinder
+- Dynamic answer model routing is in place:
+  - small/ordinary questions can use `gpt-4.1-mini`
+  - full/large casus questions can use `gpt-4.1`
+- Large-casus source grounding was tightened:
+  - prompt now requires law + article when article-level Matsne context exists
+  - correction prompt rejects source lines that only say a code name or "მუხლები მოძიებული არ არის"
+  - validator flags `**წყარო:** შრომის კოდექსი` / `სამოქალაქო კოდექსი` style source lines when no article or special rule is given
+  - validator flags personal-data answers that deny retrieved personal-data law articles
+  - postprocessor replaces malformed personal-data source lines with clean law/article wording when articles are in context
+  - postprocessor softens overbroad "administrative fine only on legal person" wording into a safer automatic-transfer/regress framework
+- ArticleDetector now also infers administrative-review grounding articles when the casus mentions administrative decisions, appeals, judicial review, administrative fines, or the Personal Data Protection Service.
+- For real-estate development / unfinished apartment sale casus patterns, ArticleDetector now infers:
+  - Civil Code articles for real-estate registration, public registry presumption, apartment ownership, mortgage priority/enforcement, inheritance, and marital property
+  - insolvency law articles for creditor claims and the creditors' register
+  - Civil Procedure Code articles for criminal-judgment preclusion, proof burden, and procedural joinder
+- Validator now flags high-risk omissions when an answer discusses registry ownership, mortgage, insolvency, inheritance, marital property, criminal preclusion, or joinder while omitting the retrieved article-level sources.
+- Current Unit verification: `139 passed (607 assertions)`.
 
 ## Current Status - 2026-06-11
 
@@ -47,6 +75,17 @@ Implemented today:
   - case retrieval, law lookup, ECHR lookup, comparative lookup
   - reranking, authority check, context building, answer writing, validation, and finalization
   - frontend labels use concise Georgian phase text while keeping the elapsed timer visible
+- Added a large-casus answer-quality fixture for public procurement + expropriation:
+  - `tests/Fixtures/large_casus_public_procurement_expropriation.json`
+  - `tests/Fixtures/large_casus_public_procurement_expropriation.md`
+  - covers expected issue spotting, key facts, required answer points, and forbidden legal mistakes
+- Strengthened large-casus source grounding:
+  - added `LegalSourceCoverageGuardService` for issue-specific source expectations
+  - large fact patterns now warn the answerer not to replace special laws with generic Civil Code / "general principles"
+  - ArticleDetector now infers special grounding sources for non-compete, labor material liability, penalty reduction, damages, and personal-data incidents
+  - personal-data law is available through the canonical Matsne resolver
+  - validator now flags generic source placeholders and Civil Code article 55 misuse
+  - full/complex casus answers can include a wider Matsne context budget
 - LLM-as-Judge remains async/optional and is not used as a blocking production gate.
 
 Still not implemented:
@@ -226,9 +265,13 @@ These do not create schema-heavy changes; they repair/activate canonical Matsne 
 Important env/model variables:
 
 ```env
-OPENAI_CHAT_MODEL=gpt-4.1
+OPENAI_CHAT_MODEL=gpt-4.1-mini
+OPENAI_COMPLEX_CHAT_MODEL=gpt-4.1
+OPENAI_DYNAMIC_CHAT_MODEL_ENABLED=true
 OPENAI_EXTRACTION_MODEL=gpt-4.1-mini
 OPENAI_JUDGE_MODEL=o4-mini
+MAX_MATSNE_CONTEXT_RESULTS=4
+MAX_MATSNE_CONTEXT_RESULTS_COMPLEX=10
 CHAT_STREAM_RATE_LIMIT_PER_MINUTE=6
 CHAT_STREAM_IP_RATE_LIMIT_PER_MINUTE=30
 EVAL_JUDGE_ENABLED=false # recommended default for production unless QA mode

@@ -7,6 +7,10 @@ return [
     'embedding_model'   => env('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-large'),
     'embedding_dimensions' => (int) env('OPENAI_EMBEDDING_DIMENSIONS', 3072),
     'chat_model'        => env('OPENAI_CHAT_MODEL', 'gpt-4.1'),
+    'dynamic_chat_model_enabled' => (bool) env('OPENAI_DYNAMIC_CHAT_MODEL_ENABLED', true),
+    'complex_chat_model' => env('OPENAI_COMPLEX_CHAT_MODEL', 'gpt-4.1'),
+    'complex_model_min_score' => (int) env('OPENAI_COMPLEX_MODEL_MIN_SCORE', 61),
+    'complex_model_min_chars' => (int) env('OPENAI_COMPLEX_MODEL_MIN_CHARS', 700),
     // Lightweight model for keyword extraction (10x cheaper than chat_model)
     'extraction_model'  => env('OPENAI_EXTRACTION_MODEL', 'gpt-4.1-mini'),
     // High-reasoning judge model for LLM-as-Judge evaluation
@@ -33,6 +37,7 @@ return [
     'max_context_decisions_complex'  => (int) env('MAX_CONTEXT_DECISIONS_COMPLEX', 5),
     'max_law_context_results'        => (int) env('MAX_LAW_CONTEXT_RESULTS', 4),
     'max_matsne_context_results'     => (int) env('MAX_MATSNE_CONTEXT_RESULTS', 4),
+    'max_matsne_context_results_complex' => (int) env('MAX_MATSNE_CONTEXT_RESULTS_COMPLEX', 10),
     'max_echr_context_results'       => (int) env('MAX_ECHR_CONTEXT_RESULTS', 2),
     'max_eu_context_results'         => (int) env('MAX_EU_CONTEXT_RESULTS', 2),
     'max_german_context_results'     => (int) env('MAX_GERMAN_CONTEXT_RESULTS', 2),

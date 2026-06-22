@@ -131,4 +131,95 @@ class OpenAILegalAnswerEchrContextTest extends TestCase
         $this->assertStringContainsString('სსკ 9', $prompt);
         $this->assertStringContainsString('არ აურიო ეს საკითხი სააპელაციო საჩივრის დასაშვებობის ზღვართან', $prompt);
     }
+
+    public function test_large_casus_prompt_includes_source_coverage_guard(): void
+    {
+        $service = $this->app->make(OpenAILegalAnswerService::class);
+        $method = new ReflectionMethod($service, 'buildSystemPrompt');
+
+        $triage = new TriageResult(
+            intent: 'search',
+            mode: 'advise',
+            caseType: 'civil',
+            domains: ['labor', 'civil', 'admin', 'corporate'],
+            issueList: IssueList::empty(),
+            searchQuery: 'არაკონკურენცია პირგასამტეხლო პერსონალურ მონაცემთა გაჟონვა ზიანი ოფციონი',
+            needsNorms: true,
+            needsCases: true,
+            needsConstCourt: false,
+            needsEu: false,
+            needsGerman: false,
+            temporalYear: 2026,
+            isComplex: true,
+            complexityScore: 88,
+            complexityLevel: 'full',
+            complexityReasons: ['long_fact_pattern', 'multiple_domains'],
+        );
+
+        $prompt = $method->invoke(
+            $service,
+            'advise',
+            new ConfidenceResult(0.0, 'none', ''),
+            ['court', 'matsne'],
+            true,
+            IssueList::empty(),
+            'თანამშრომელი გაათავისუფლეს მონაცემთა გაჟონვის გამო; დავაა არაკონკურენციაზე, პირგასამტეხლოზე, ოფციონზე და პერსონალურ მონაცემთა დაცვის სამსახურის ჯარიმაზე.',
+            $triage,
+        );
+
+        $this->assertStringContainsString('LARGE-CASUS SOURCE COVERAGE GUARD', $prompt);
+        $this->assertStringContainsString('პერსონალურ მონაცემთა დაცვის შესახებ', $prompt);
+        $this->assertStringContainsString('არ გამოიყენო სამოქალაქო კოდექსის 55-ე მუხლი პირგასამტეხლოს', $prompt);
+    }
+
+    public function test_full_casus_uses_wider_matsne_context_limit(): void
+    {
+        config([
+            'openai.max_matsne_context_results' => 4,
+            'openai.max_matsne_context_results_complex' => 10,
+        ]);
+
+        $service = $this->app->make(OpenAILegalAnswerService::class);
+        $method = new ReflectionMethod($service, 'buildContextBlock');
+        $matsne = [];
+
+        for ($i = 1; $i <= 7; $i++) {
+            $matsne[] = [
+                'matsne_id' => 1000 + $i,
+                'title' => "კანონი {$i}",
+                'doc_type' => 'law',
+                'issuer' => 'Parliament',
+                'is_active' => true,
+                'effective_from_year' => 2020,
+                'effective_to_year' => null,
+                'excerpt' => "მუხლი {$i}. სპეციალური წესი {$i}.",
+                'similarity' => 0.9,
+                'url' => "https://example.test/{$i}",
+                'hierarchy_level' => 1,
+            ];
+        }
+
+        $triage = new TriageResult(
+            intent: 'search',
+            mode: 'advise',
+            caseType: 'civil',
+            domains: ['labor', 'civil', 'admin'],
+            issueList: IssueList::empty(),
+            searchQuery: 'large casus',
+            needsNorms: true,
+            needsCases: true,
+            needsConstCourt: false,
+            needsEu: false,
+            needsGerman: false,
+            temporalYear: null,
+            isComplex: true,
+            complexityScore: 90,
+            complexityLevel: 'full',
+            complexityReasons: ['long_fact_pattern'],
+        );
+
+        $context = $method->invoke($service, [], 0, 'explain', [], [], $matsne, [], [], [], $triage);
+
+        $this->assertStringContainsString('კანონი 7', $context);
+    }
 }

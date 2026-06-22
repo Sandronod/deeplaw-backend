@@ -141,6 +141,22 @@ class AnswerValidatorService
             $flags[] = $proceduralFlag;
         }
 
+        foreach ($this->detectGenericSourcePlaceholders($answerText) as $genericSourceFlag) {
+            $flags[] = $genericSourceFlag;
+        }
+
+        foreach ($this->detectPrivacyLawOmission($answerText, $matsneResults) as $privacyFlag) {
+            $flags[] = $privacyFlag;
+        }
+
+        foreach ($this->detectSpecialSourceOmissions($answerText, $answerArticles, $matsneResults) as $sourceOmissionFlag) {
+            $flags[] = $sourceOmissionFlag;
+        }
+
+        foreach ($this->detectCivilCode55Misuse($answerText) as $civilCode55Flag) {
+            $flags[] = $civilCode55Flag;
+        }
+
         $score = $this->score($flags);
         $verdict = $this->verdict($flags, $score);
 
@@ -161,6 +177,10 @@ class AnswerValidatorService
                 'non_binding_authority_claims' => count(array_filter($flags, fn (array $f) => $f['type'] === 'non_binding_case_called_binding')),
                 'remedy_mismatch_claims' => count(array_filter($flags, fn (array $f) => in_array($f['type'], ['unsupported_legal_remedy', 'defect_nullity_conflation', 'defect_notice_as_challenge_period'], true))),
                 'procedural_mismatch_claims' => count(array_filter($flags, fn (array $f) => in_array($f['type'], ['wrong_threshold_boundary', 'contradictory_boundary_application'], true))),
+                'generic_source_placeholders' => count(array_filter($flags, fn (array $f) => $f['type'] === 'generic_source_placeholder')),
+                'privacy_law_omissions' => count(array_filter($flags, fn (array $f) => in_array($f['type'], ['privacy_law_omission', 'privacy_law_source_denied'], true))),
+                'special_source_omissions' => count(array_filter($flags, fn (array $f) => str_ends_with($f['type'], '_source_omission'))),
+                'civil_code_55_misuse' => count(array_filter($flags, fn (array $f) => $f['type'] === 'civil_code_55_misuse')),
             ],
             'checked' => [
                 'answer_articles' => $answerArticles,
@@ -517,6 +537,363 @@ class AnswerValidatorService
     private function detectProceduralConsequenceClaims(string $answerText): array
     {
         return $this->consequenceTaxonomy->boundaryFindings($answerText);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectGenericSourcePlaceholders(string $answerText): array
+    {
+        $flags = [];
+        $lines = preg_split('/\R+/u', $answerText) ?: [$answerText];
+
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+            if ($trimmed === '') {
+                continue;
+            }
+
+            $lower = mb_strtolower($trimmed);
+            $isNormLine = str_contains($lower, 'კანონი/ნორმა')
+                || str_contains($lower, '📕')
+                || str_contains($lower, 'წყარო:')
+                || str_contains($lower, '**წყარო')
+                || str_contains($lower, '**კანონი')
+                || str_starts_with($lower, 'ნორმა:');
+
+            if ($this->containsAny($lower, [
+                'ზოგადი პრინციპ',
+                'ზოგადი სამართლებრივი პრინციპ',
+                'მუხლები მოძიებული არ არის',
+                'მუხლი მოძიებული არ არის',
+            ])) {
+                $flags[] = $this->flag(
+                    'generic_source_placeholder',
+                    'high',
+                    'პასუხი კონკრეტული ნორმის ნაცვლად იყენებს ბუნდოვან წყაროს/„მუხლები მოძიებული არ არის“ ფორმულას. დიდ კაზუსში უნდა მიეთითოს კონკრეტული მუხლი ან ფრთხილად ითქვას, რომ კონკრეტული მუხლი მოძიებული წყაროებით არ დასტურდება.',
+                    null,
+                    mb_substr($trimmed, 0, 180),
+                );
+                continue;
+            }
+
+            if ($isNormLine
+                && $this->containsAny($lower, [
+                    'საქართველოს სამოქალაქო კოდექსი',
+                    'საქართველოს შრომის კოდექსი',
+                    'სამოქალაქო კოდექსი',
+                    'შრომის კოდექსი',
+                    'ადმინისტრაციული წარმოების შესახებ კანონმდებლობა',
+                    'ადმინისტრაციული სამართლის ზოგადი პრინციპ',
+                    'ადმინისტრაციული სამართალწარმო',
+                    'პერსონალურ მონაცემთა დაცვის შესახებ კანონმდებლობა',
+                ])
+                && !$this->containsAny($lower, ['მუხლი', 'მუხლები', 'მუხ.', '-ე', '№'])
+            ) {
+                $flags[] = $this->flag(
+                    'generic_source_placeholder',
+                    'high',
+                    'პასუხი წყაროდ ასახელებს მხოლოდ კანონს/კოდექსს კონკრეტული მუხლის ან სპეციალური წესის გარეშე.',
+                    null,
+                    mb_substr($trimmed, 0, 180),
+                );
+            }
+
+            if ($isNormLine
+                && $this->containsAny($lower, ['სპეციალური ნორმა', 'სპეციალური კანონი'])
+                && $this->containsAny($lower, ['არ მოიძებნა', 'ვერ მოიძებნა', 'არ იძებნება'])
+            ) {
+                $flags[] = $this->flag(
+                    'generic_source_placeholder',
+                    'high',
+                    'პასუხი საკითხს ტოვებს „სპეციალური ნორმა არ მოიძებნა“ ფორმულით. თუ სპეციალური წყარო არ ჩანს, უნდა მიეთითოს რომელი მოძიებული წყაროებით არ დასტურდება და რა ზოგადი ჩარჩო გამოიყენება.',
+                    null,
+                    mb_substr($trimmed, 0, 180),
+                );
+            }
+        }
+
+        return $flags;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectCivilCode55Misuse(string $answerText): array
+    {
+        $flags = [];
+
+        foreach ($this->civilCode55Windows($answerText) as $window) {
+            $lower = mb_strtolower($window);
+
+            if ($this->isAllowedCivilCode55Use($lower)) {
+                continue;
+            }
+
+            if (!$this->containsAny($lower, [
+                'პირგასამტეხლ',
+                'ოფციონ',
+                'აქცი',
+                'ზიან',
+                'მიზეზობრივ',
+                'ბრალეულ',
+                'ადმინისტრაციულ',
+                'ჯარიმ',
+                'მონაცემ',
+                'გათავისუფლ',
+                'ბონუს',
+            ])) {
+                continue;
+            }
+
+            $flags[] = $this->flag(
+                'civil_code_55_misuse',
+                'high',
+                'სამოქალაქო კოდექსის 55-ე მუხლი გამოყენებულია როგორც ზოგადი საფუძველი ისეთ საკითხზე, სადაც საჭიროა სპეციალური ნორმა (მაგ. პირგასამტეხლო, ზიანი, ადმინისტრაციული ჯარიმა, ოფციონი ან შრომითი შედეგი).',
+                '55',
+                mb_substr(trim($window), 0, 220),
+            );
+        }
+
+        return $flags;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $matsneResults
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectPrivacyLawOmission(string $answerText, array $matsneResults): array
+    {
+        $lower = mb_strtolower($answerText);
+
+        if (!$this->containsAny($lower, ['პერსონალურ მონაცემ', 'მონაცემთა გაჟონ', 'მონაცემთა დაცვის სამსახ', 'მონაცემთა დაცვ'])) {
+            return [];
+        }
+
+        if (!$this->sourceHasPersonalDataLaw($matsneResults)) {
+            return [];
+        }
+
+        if ($this->claimsPersonalDataLawNotFound($answerText)) {
+            return [
+                $this->flag(
+                    'privacy_law_source_denied',
+                    'high',
+                    'პასუხი წერს, რომ პერსონალურ მონაცემთა დაცვის სპეციალური ნორმა ვერ მოიძებნა, თუმცა მოძიებულ წყაროებში არის „პერსონალურ მონაცემთა დაცვის შესახებ“ კანონი.',
+                    'personal_data_law',
+                ),
+            ];
+        }
+
+        if (str_contains($lower, 'პერსონალურ მონაცემთა დაცვის შესახებ')) {
+            return [];
+        }
+
+        return [
+            $this->flag(
+                'privacy_law_omission',
+                'high',
+                'პასუხი მსჯელობს პერსონალურ მონაცემებზე, მაგრამ არ იყენებს მოძიებულ სპეციალურ კანონს „პერსონალურ მონაცემთა დაცვის შესახებ“. საკითხი არ უნდა დარჩეს მხოლოდ შრომის/სამოქალაქო ნორმებზე.',
+                'personal_data_law',
+            ),
+        ];
+    }
+
+    private function claimsPersonalDataLawNotFound(string $answerText): bool
+    {
+        $lower = mb_strtolower($answerText);
+
+        return (bool) preg_match(
+            '/პერსონალურ მონაცემთა დაცვის შესახებ(?:\s+კანონის მიხედვით)?.{0,180}(?:არ მოიძებნ|არ არის პირდაპირ დადასტურ|არ არის დადასტურ|მუხლები მოძიებული არ არის|მუხლი მოძიებული არ არის)/u',
+            $lower,
+        );
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $matsneResults
+     */
+    private function sourceHasPersonalDataLaw(array $matsneResults): bool
+    {
+        foreach ($matsneResults as $result) {
+            $title = mb_strtolower((string) ($result['title'] ?? ''));
+            $text = mb_strtolower((string) ($result['excerpt'] ?? '') . "\n" . (string) ($result['content'] ?? ''));
+
+            if (str_contains($title, 'პერსონალურ მონაცემთა დაცვის შესახებ')
+                || str_contains($text, 'პერსონალურ მონაცემთა დაცვის შესახებ')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param array<int, string> $answerArticles
+     * @param array<int, array<string, mixed>> $matsneResults
+     * @return array<int, array<string, mixed>>
+     */
+    private function detectSpecialSourceOmissions(string $answerText, array $answerArticles, array $matsneResults): array
+    {
+        $lower = mb_strtolower($answerText);
+        $flags = [];
+
+        $expectations = [
+            [
+                'type' => 'real_estate_registry_source_omission',
+                'triggers' => ['საჯარო რეესტრ', 'რეგისტრაცი', 'დაურეგისტრირ', 'უძრავ ნივთ', 'ბინის საკუთრ'],
+                'title' => 'სამოქალაქო კოდექსი',
+                'articles' => ['183', '185', '311', '312', '323'],
+                'message' => 'პასუხი მსჯელობს უძრავი ნივთის რეგისტრაციაზე/რეესტრზე, მაგრამ არ ასახელებს მოძიებულ სპეციალურ მუხლებს უძრავი ნივთის შეძენასა და რეესტრის პრეზუმფციაზე.',
+            ],
+            [
+                'type' => 'mortgage_source_omission',
+                'triggers' => ['იპოთეკ'],
+                'title' => 'სამოქალაქო კოდექსი',
+                'articles' => ['286', '287', '290', '297', '300', '301', '302'],
+                'message' => 'პასუხი მსჯელობს იპოთეკაზე/რეალიზაციაზე, მაგრამ არ ასახელებს მოძიებულ სპეციალურ მუხლებს იპოთეკის ცნებაზე, რიგითობაზე ან რეალიზაციაზე.',
+            ],
+            [
+                'type' => 'inheritance_source_omission',
+                'triggers' => ['მემკვიდრ', 'სამკვიდრ', 'გარდაიცვალ'],
+                'title' => 'სამოქალაქო კოდექსი',
+                'articles' => ['1306', '1307', '1319', '1320', '1328', '1336', '1339'],
+                'message' => 'პასუხი მსჯელობს მემკვიდრეობაზე/სამკვიდროზე, მაგრამ არ ასახელებს მოძიებულ მემკვიდრეობის სპეციალურ მუხლებს.',
+            ],
+            [
+                'type' => 'marital_property_source_omission',
+                'triggers' => ['მეუღლეთა საერთო', 'მეუღლეთა თანასაკუთრ', 'ქორწინების განმავლობაში', 'მეუღლე აცხადებს'],
+                'title' => 'სამოქალაქო კოდექსი',
+                'articles' => ['1158', '1160', '1161', '1163', '1171'],
+                'message' => 'პასუხი მსჯელობს მეუღლეთა ქონებრივ რეჟიმზე, მაგრამ არ ასახელებს მოძიებულ მუხლებს მეუღლეთა თანასაკუთრებაზე.',
+            ],
+            [
+                'type' => 'insolvency_source_omission',
+                'triggers' => ['გადახდისუუნარ', 'გაკოტრ', 'კრედიტორ'],
+                'title' => 'რეაბილიტაციისა და კრედიტორთა კოლექტიური დაკმაყოფილების შესახებ',
+                'articles' => ['1', '3', '5', '6', '52'],
+                'message' => 'პასუხი მსჯელობს გადახდისუუნარობაზე/კრედიტორულ სტატუსზე, მაგრამ არ ასახელებს მოძიებულ სპეციალურ გადახდისუუნარობის კანონს ან მის მუხლებს.',
+            ],
+            [
+                'type' => 'criminal_preclusion_source_omission',
+                'triggers' => ['სისხლის სამართლის', 'თაღლით', 'განაჩენ', 'პრეიუდიც'],
+                'title' => 'სამოქალაქო საპროცესო კოდექსი',
+                'articles' => ['106'],
+                'message' => 'პასუხი მსჯელობს სისხლის სამართლის განაჩენის გავლენაზე, მაგრამ არ ასახელებს სამოქალაქო საპროცესო კოდექსის პრეიუდიციულობის მუხლს.',
+            ],
+            [
+                'type' => 'joinder_source_omission',
+                'triggers' => ['კოლექტიური სარჩელ', 'ერთობლივი სარჩელ', 'რამდენიმე მოსარჩელ'],
+                'title' => 'სამოქალაქო საპროცესო კოდექსი',
+                'articles' => ['86'],
+                'message' => 'პასუხი მსჯელობს რამდენიმე მოსარჩელის ერთობლივ სარჩელზე, მაგრამ არ ასახელებს საპროცესო თანამონაწილეობის მუხლს.',
+            ],
+        ];
+
+        foreach ($expectations as $expectation) {
+            if (!$this->containsAny($lower, $expectation['triggers'])) {
+                continue;
+            }
+
+            if (!$this->sourceHasAnyArticleForTitle($matsneResults, $expectation['title'], $expectation['articles'])) {
+                continue;
+            }
+
+            if ((bool) array_intersect($answerArticles, $expectation['articles'])) {
+                continue;
+            }
+
+            $flags[] = $this->flag(
+                $expectation['type'],
+                'high',
+                $expectation['message'],
+                implode(',', $expectation['articles']),
+            );
+        }
+
+        return $flags;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $matsneResults
+     * @param array<int, string> $articles
+     */
+    private function sourceHasAnyArticleForTitle(array $matsneResults, string $titleNeedle, array $articles): bool
+    {
+        $titleNeedle = mb_strtolower($titleNeedle);
+
+        foreach ($matsneResults as $result) {
+            $title = mb_strtolower((string) ($result['title'] ?? ''));
+            if (!str_contains($title, $titleNeedle)) {
+                continue;
+            }
+
+            foreach (['_article_num', 'article_num'] as $key) {
+                if (isset($result[$key]) && preg_match('/\d{1,4}/', (string) $result[$key], $match)) {
+                    if (in_array((string) (int) $match[0], $articles, true)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function civilCode55Windows(string $answerText): array
+    {
+        $windows = [];
+        $lowerText = mb_strtolower($answerText);
+        $patterns = [
+            '/(?:სკ(?:-ის)?|სამოქალაქო კოდექს(?:ი|ის)?|საქართველოს სამოქალაქო კოდექს(?:ი|ის)?).{0,50}(?:55|55-ე)/u',
+            '/(?:55|55-ე).{0,50}(?:სკ|სამოქალაქო კოდექს)/u',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (!preg_match_all($pattern, $lowerText, $matches, PREG_OFFSET_CAPTURE)) {
+                continue;
+            }
+
+            foreach ($matches[0] ?? [] as $match) {
+                $offset = (int) ($match[1] ?? 0);
+                $window = substr($lowerText, $offset, strlen((string) $match[0]) + 520);
+                if (!$this->hasCivilCode55Negation($window)) {
+                    $windows[] = trim($window);
+                }
+            }
+        }
+
+        return array_values(array_unique($windows));
+    }
+
+    private function hasCivilCode55Negation(string $window): bool
+    {
+        return (bool) preg_match(
+            '/(?:55|55-ე|სამოქალაქო კოდექს(?:ი|ის)?).{0,80}(?:არ გამოიყენ|არ არის რელევანტ|არ ვრცელდ|არ წარმოადგენს|არ უნდა გამოიყენ)/u',
+            $window,
+        );
+    }
+
+    private function isAllowedCivilCode55Use(string $lowerWindow): bool
+    {
+        if (str_contains($lowerWindow, 'პირგასამტეხლ')) {
+            return false;
+        }
+
+        return $this->containsAny($lowerWindow, [
+            'ამორალ',
+            'ზნეობ',
+            'გარიგებ',
+            'შესრულებათა',
+            'საპასუხო შესრულ',
+            'მძიმე მდგომარეობ',
+            'გულუბრყვილ',
+            'გამოუცდელ',
+            'აშკარა შეუსაბამ',
+        ]);
     }
 
     /**

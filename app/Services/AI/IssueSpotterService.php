@@ -64,7 +64,7 @@ FEWSHOT;
                 ->post("{$this->baseUrl}/chat/completions", [
                     'model'       => $this->model,
                     'temperature' => 0,
-                    'max_tokens'  => 1000,
+                    'max_tokens'  => 1400,
                     'messages'    => [
                         ['role' => 'system', 'content' => $this->systemPrompt()],
                         ['role' => 'user',   'content' => self::FEW_SHOT . "\n\nINPUT:\n\"{$userQuestion}\"\n\nOUTPUT:"],
@@ -104,7 +104,7 @@ FEWSHOT;
 ამოცანა: წაიკითხე კაზუსი/შეკითხვა და გამოყავი ყველა სამართლებრივი საკითხი.
 
 RULES:
-- ამოიყვანე ყველა საკითხი (მინ. 1, მაქს. 8)
+- ამოიყვანე ყველა საკითხი (მინ. 1, მაქს. 12)
 - თითოეული = ერთი კონკრეტული სამართლებრივი კითხვა
 - priority: 1 = ყველაზე კრიტიკული
 - domain: მხოლოდ ეს მნიშვნელობები: civil, criminal, admin, corporate, labor, property, procedure, tax, family, echr
