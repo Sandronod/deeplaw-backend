@@ -1,7 +1,9 @@
 <?php
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AdminUserController;
 use App\Http\Controllers\Api\FullCaseController;
+use App\Http\Controllers\Api\LegalAnswerReviewController;
 use App\Http\Controllers\Api\LegalChatController;
 use Illuminate\Support\Facades\Route;
 
@@ -32,4 +34,12 @@ Route::middleware('auth:sanctum')->prefix('chats')->group(function () {
         ->middleware('throttle:chat-stream');
     Route::post('/{chat}/messages',                 [LegalChatController::class, 'sendMessage'])
         ->middleware('throttle:chat-stream');
+});
+
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/messages/{message}/review', [LegalAnswerReviewController::class, 'show']);
+    Route::post('/messages/{message}/review', [LegalAnswerReviewController::class, 'store']);
+
+    Route::get('/admin/users', [AdminUserController::class, 'index']);
+    Route::post('/admin/users', [AdminUserController::class, 'store']);
 });

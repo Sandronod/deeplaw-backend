@@ -8,6 +8,9 @@ readonly class SourcePlan
         public bool $useDomestic,
         public bool $useLaw,
         public bool $useEchr = false,
+        public bool $useEu = false,
+        public bool $useGerman = false,
+        public bool $useConstCourt = false,
     ) {}
 
     public function isHybrid(): bool
@@ -26,6 +29,9 @@ readonly class SourcePlan
             $this->useDomestic ? 'domestic' : null,
             $this->useLaw      ? 'law'      : null,
             $this->useEchr     ? 'echr'     : null,
+            $this->useEu       ? 'eu'       : null,
+            $this->useGerman   ? 'german'   : null,
+            $this->useConstCourt ? 'const_court' : null,
         ]));
     }
 }

@@ -99,16 +99,18 @@ class LegalTriageService
         // Triage can further restrict (e.g. pure criminal → no EU)
         $wantsCourt      = empty($activeSources) || in_array('court',       $activeSources);
         $wantsMatsne     = empty($activeSources) || in_array('matsne',      $activeSources);
-        $wantsConstCourt = empty($activeSources) || in_array('const_court', $activeSources);
-        $wantsEu         = empty($activeSources) || in_array('eu',          $activeSources);
-        $wantsGerman     = empty($activeSources) || in_array('german',      $activeSources);
+        $wantsEchr       = empty($activeSources) || in_array('echr',        $activeSources) || $this->hasEchrSignals($question);
+        $wantsConstCourt = empty($activeSources) || in_array('const_court', $activeSources) || $this->hasConstCourtSignals($question);
+        $wantsEu         = empty($activeSources) || in_array('eu',          $activeSources) || $this->hasEuSignals($question);
+        $wantsGerman     = empty($activeSources) || in_array('german',      $activeSources) || $this->hasGermanSignals($question);
         $simpleDomesticNormLookup = $this->isSimpleDomesticNormLookup($question, $mode, $wantsMatsne);
+        $wantsNonDomesticAuthority = $wantsEchr || $wantsConstCourt || $wantsEu || $wantsGerman;
 
         // სისხლის საქმეში EU/ConstCourt ნაკლებად გამოდგება
         $isCriminal = $caseType === 'criminal';
 
         $needsNorms      = $wantsMatsne;
-        $normOnlyAnswer  = $simpleDomesticNormLookup || $simpleRuleApplication;
+        $normOnlyAnswer  = !$wantsNonDomesticAuthority && ($simpleDomesticNormLookup || $simpleRuleApplication);
         $needsCases      = $wantsCourt      && !$normOnlyAnswer;
         $needsConstCourt = $wantsConstCourt && !$isCriminal && !$normOnlyAnswer;
         $needsEu         = $wantsEu         && !$isCriminal && !$normOnlyAnswer;
@@ -367,6 +369,82 @@ class LegalTriageService
 
         foreach ($signals as $signal) {
             if (str_contains($lower, $signal)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function hasEuSignals(string $question): bool
+    {
+        return $this->containsAny(mb_strtolower($question), [
+            'eu',
+            'ევროკავშირ',
+            'ევროკავშირის სამართალ',
+            'ევროპული კავშირ',
+            'directive',
+            'regulation',
+            'cjeu',
+            'court of justice',
+        ]);
+    }
+
+    private function hasEchrSignals(string $question): bool
+    {
+        return $this->containsAny(mb_strtolower($question), [
+            'echr',
+            'hudoc',
+            'სტრასბურგ',
+            'კონვენცი',
+            'ადამიანის უფლებათა ევროპული სასამართლო',
+            'ადამიანის უფლებათა ევროპული კონვენცია',
+            'european court of human rights',
+            'fair trial',
+            'article 6',
+            'article 8',
+        ]);
+    }
+
+    private function hasGermanSignals(string $question): bool
+    {
+        return $this->containsAny(mb_strtolower($question), [
+            'გერმან',
+            'გერმანიის სასამართლო',
+            'გერმანული სასამართლო',
+            'გერმანული პრაქტიკ',
+            'გერმანიის პრაქტიკ',
+            'გერმანული გადაწყვეტილ',
+            'german',
+            'germany',
+            'deutsch',
+            'bgh',
+            'bundesgerichtshof',
+            'bundesverfassungsgericht',
+            'bundesarbeitsgericht',
+            'olg',
+        ]);
+    }
+
+    private function hasConstCourtSignals(string $question): bool
+    {
+        return $this->containsAny(mb_strtolower($question), [
+            'საკონსტიტუციო სასამართლო',
+            'საკონსტიტუციო პრაქტიკ',
+            'კონსტიტუციური სარჩელ',
+            'კონსტიტუციურობა',
+            'არაკონსტიტუციურ',
+            'constitutional court',
+        ]);
+    }
+
+    /**
+     * @param array<int, string> $signals
+     */
+    private function containsAny(string $lower, array $signals): bool
+    {
+        foreach ($signals as $signal) {
+            if (str_contains($lower, mb_strtolower($signal))) {
                 return true;
             }
         }

@@ -41,4 +41,9 @@ class User extends Authenticatable
     {
         return "{$this->first_name} {$this->last_name}";
     }
+
+    public function isMainAdmin(): bool
+    {
+        return strcasecmp($this->email, (string) config('legal_admin.main_admin_email')) === 0;
+    }
 }

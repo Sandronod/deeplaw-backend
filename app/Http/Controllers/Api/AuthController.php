@@ -13,6 +13,15 @@ class AuthController extends Controller
 {
     public function register(Request $request): JsonResponse
     {
+        $isBootstrapMainAdmin = User::query()->count() === 0
+            && strcasecmp((string) $request->input('email'), (string) config('legal_admin.main_admin_email')) === 0;
+
+        if (! config('legal_admin.allow_public_registration') && ! $isBootstrapMainAdmin) {
+            return response()->json([
+                'message' => 'Public registration is disabled. Users must be created by the main admin.',
+            ], 403);
+        }
+
         $data = $request->validate([
             'first_name' => ['required', 'string', 'max:100'],
             'last_name'  => ['required', 'string', 'max:100'],
@@ -73,6 +82,7 @@ class AuthController extends Controller
             'last_name'  => $user->last_name,
             'email'      => $user->email,
             'phone'      => $user->phone,
+            'is_main_admin' => $user->isMainAdmin(),
         ];
     }
 }

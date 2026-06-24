@@ -226,18 +226,28 @@ class LegalChatOrchestratorService
         $germanResults     = [];
         $constCourtResults = [];
         $sourcesStartedAt  = microtime(true);
+        $wantsMatsne = $wantsEchr = $wantsEu = $wantsGerman = $wantsConstCourt = false;
+        $sourceAttempted = [
+            'matsne' => false,
+            'echr' => false,
+            'eu' => false,
+            'german' => false,
+            'const_court' => false,
+        ];
+        $sourceErrors = [];
 
         if (!$triageResult->isChatOnly()) {
             $lawDomains = $triageResult->domains;
             $wantsMatsne     = empty($sources) || in_array('matsne', $sources, true);
             $wantsEchr       = empty($sources) || in_array('echr', $sources, true) || $sourcePlan->useEchr;
-            $wantsEu         = empty($sources) || in_array('eu', $sources, true);
-            $wantsGerman     = empty($sources) || in_array('german', $sources, true);
-            $wantsConstCourt = empty($sources) || in_array('const_court', $sources, true);
+            $wantsEu         = empty($sources) || in_array('eu', $sources, true) || $sourcePlan->useEu;
+            $wantsGerman     = empty($sources) || in_array('german', $sources, true) || $sourcePlan->useGerman;
+            $wantsConstCourt = empty($sources) || in_array('const_court', $sources, true) || $sourcePlan->useConstCourt;
 
-            if ($wantsEchr && $sourcePlan->useEchr && $parsedQuery !== null) {
+            if ($wantsEchr && $parsedQuery !== null) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $sourceAttempted['echr'] = true;
                     $this->reportProgress($progress, 'echr_lookup');
                     $echrText = $searchTerms ?: $userQuestion;
                     $echrEmbedding = Cache::remember(
@@ -254,6 +264,7 @@ class LegalChatOrchestratorService
                     Log::debug('Orchestrator: ECHR retrieval', ['count' => count($echrResults)]);
                 } catch (\Throwable $e) {
                     $timings['echr_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    $sourceErrors['echr'] = $e->getMessage();
                     Log::warning('Orchestrator: ECHR retrieval failed', ['error' => $e->getMessage()]);
                 }
             }
@@ -262,6 +273,7 @@ class LegalChatOrchestratorService
                 // ── Article detector first — no Ollama needed (direct LIKE query) ─
                 try {
                     $sourceStartedAt = microtime(true);
+                    $sourceAttempted['matsne'] = true;
                     $this->reportProgress($progress, 'law_lookup');
                     $articleDetectorQuery = trim(implode("\n", array_filter([
                         $userQuestion,
@@ -280,6 +292,7 @@ class LegalChatOrchestratorService
                     }
                 } catch (\Throwable $e) {
                     $timings['article_detector'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    $sourceErrors['matsne'] = $e->getMessage();
                     Log::warning('Orchestrator: article detector failed', ['error' => $e->getMessage()]);
                 }
             }
@@ -321,6 +334,7 @@ class LegalChatOrchestratorService
             if ($useSemanticNormSupplement && $wantsMatsne && !empty($ollamaEmbedding) && !empty($lawDomains)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $sourceAttempted['matsne'] = true;
                     $this->reportProgress($progress, 'law_lookup');
                     $semanticArticles = $this->semanticArticleRetriever->retrieve($ollamaEmbedding, $lawDomains, relevantYear: $relevantYear);
                     if (!empty($semanticArticles)) {
@@ -351,6 +365,7 @@ class LegalChatOrchestratorService
                     $timings['semantic_article_retrieval'] = $this->elapsedMs($sourceStartedAt);
                 } catch (\Throwable $e) {
                     $timings['semantic_article_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    $sourceErrors['matsne'] ??= $e->getMessage();
                     Log::warning('Orchestrator: semantic article retriever failed', ['error' => $e->getMessage()]);
                 }
             }
@@ -402,12 +417,14 @@ class LegalChatOrchestratorService
             if ($wantsEu && $triageResult->needsEu && !empty($ollamaEmbedding)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $sourceAttempted['eu'] = true;
                     $this->reportProgress($progress, 'comparative_lookup');
                     $euResults = $this->euRetriever->retrieve($searchTerms ?: $userQuestion, embedding: $ollamaEmbedding);
                     $timings['eu_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: EU retrieval', ['count' => count($euResults)]);
                 } catch (\Throwable $e) {
                     $timings['eu_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    $sourceErrors['eu'] = $e->getMessage();
                     Log::warning('Orchestrator: EU retrieval failed', ['error' => $e->getMessage()]);
                 }
             }
@@ -415,12 +432,14 @@ class LegalChatOrchestratorService
             if ($wantsGerman && $triageResult->needsGerman && !empty($ollamaEmbedding)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $sourceAttempted['german'] = true;
                     $this->reportProgress($progress, 'comparative_lookup');
                     $germanResults = $this->germanRetriever->retrieve($searchTerms ?: $userQuestion, embedding: $ollamaEmbedding);
                     $timings['german_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: german retrieval', ['count' => count($germanResults)]);
                 } catch (\Throwable $e) {
                     $timings['german_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    $sourceErrors['german'] = $e->getMessage();
                     Log::warning('Orchestrator: german retrieval failed', ['error' => $e->getMessage()]);
                 }
             }
@@ -428,17 +447,41 @@ class LegalChatOrchestratorService
             if ($wantsConstCourt && $triageResult->needsConstCourt && !empty($ollamaEmbedding)) {
                 try {
                     $sourceStartedAt = microtime(true);
+                    $sourceAttempted['const_court'] = true;
                     $this->reportProgress($progress, 'authority_check');
                     $constCourtResults = $this->constCourtRetriever->retrieve($searchTerms ?: $userQuestion, $ollamaEmbedding);
                     $timings['const_court_retrieval'] = $this->elapsedMs($sourceStartedAt);
                     Log::debug('Orchestrator: const_court retrieval', ['count' => count($constCourtResults)]);
                 } catch (\Throwable $e) {
                     $timings['const_court_retrieval'] = $this->elapsedMs($sourceStartedAt ?? microtime(true));
+                    $sourceErrors['const_court'] = $e->getMessage();
                     Log::warning('Orchestrator: const_court retrieval failed', ['error' => $e->getMessage()]);
                 }
             }
         }
         $timings['source_retrieval_total'] = $this->elapsedMs($sourcesStartedAt);
+        $sourceStatus = $this->buildSourceStatus(
+            requestedSources: $sources,
+            triageResult: $triageResult,
+            wants: [
+                'court' => empty($sources) || in_array('court', $sources, true),
+                'matsne' => $wantsMatsne,
+                'echr' => $wantsEchr,
+                'eu' => $wantsEu,
+                'german' => $wantsGerman,
+                'const_court' => $wantsConstCourt,
+            ],
+            attempted: $sourceAttempted,
+            errors: $sourceErrors,
+            counts: [
+                'court' => count($enrichedDecisions),
+                'matsne' => count($matsneResults),
+                'echr' => count($echrResults),
+                'eu' => count($euResults),
+                'german' => count($germanResults),
+                'const_court' => count($constCourtResults),
+            ],
+        );
 
         // ── 9. Rule extraction — Stage 1 of two-stage answering ──────────────
         // Extracts concrete rules (deadlines, thresholds) from retrieved matsne articles
@@ -486,12 +529,70 @@ class LegalChatOrchestratorService
             'germanResults'      => $germanResults,
             'constCourtResults'  => $constCourtResults,
             'sourcePlan'         => $sourcePlan,
+            'sourceStatus'       => $sourceStatus,
             'sources'            => $sources,
             'history'            => $history,
             'issueList'          => $issueList,
             'extractedRules'     => $extractedRules,
             'timings_ms'         => $timings,
         ];
+    }
+
+    /**
+     * Tracks whether each optional source was requested/routed/searched.
+     * This lets the UI distinguish "not found" from "not attempted".
+     */
+    private function buildSourceStatus(
+        array $requestedSources,
+        TriageResult $triageResult,
+        array $wants,
+        array $attempted,
+        array $errors,
+        array $counts,
+    ): array {
+        $sourceNeeds = [
+            'court' => $triageResult->needsCases,
+            'matsne' => $triageResult->needsNorms,
+            'echr' => $triageResult->needsCases || $triageResult->needsNorms,
+            'eu' => $triageResult->needsEu,
+            'german' => $triageResult->needsGerman,
+            'const_court' => $triageResult->needsConstCourt,
+        ];
+
+        $status = [];
+        foreach (self::SUPPORTED_SOURCES as $source) {
+            $requested = empty($requestedSources) || in_array($source, $requestedSources, true);
+            $routed = (bool) ($wants[$source] ?? false) && (bool) ($sourceNeeds[$source] ?? false);
+            $didAttempt = $source === 'court'
+                ? $routed
+                : (bool) ($attempted[$source] ?? false);
+            $count = (int) ($counts[$source] ?? 0);
+            $error = $errors[$source] ?? null;
+
+            $sourceStatus = 'not_needed';
+            if ($error !== null) {
+                $sourceStatus = 'failed';
+            } elseif ($didAttempt && $count > 0) {
+                $sourceStatus = 'found';
+            } elseif ($didAttempt) {
+                $sourceStatus = 'not_found';
+            } elseif ($routed) {
+                $sourceStatus = 'not_attempted';
+            } elseif ($requested) {
+                $sourceStatus = 'not_routed';
+            }
+
+            $status[$source] = array_filter([
+                'requested' => $requested,
+                'routed' => $routed,
+                'attempted' => $didAttempt,
+                'count' => $count,
+                'status' => $sourceStatus,
+                'error' => $error ? mb_substr($error, 0, 240) : null,
+            ], static fn ($value) => $value !== null);
+        }
+
+        return $status;
     }
 
     /**
@@ -858,7 +959,9 @@ PROMPT;
                     'level'   => $ctx['triageResult']->complexityLevel,
                     'reasons' => $ctx['triageResult']->complexityReasons,
                 ],
+                'requested_sources'    => $ctx['sources'] ?? [],
                 'sources_active'       => $ctx['sourcePlan']->sourcesActive(),
+                'source_status'        => $ctx['sourceStatus'] ?? [],
                 'matched_case_ids'     => $ctx['retrieval']->matchedCaseIds,
                 'matched_case_numbers' => $ctx['retrieval']->matchedCaseNumbers,
                 'relevance_scores'     => $ctx['retrieval']->relevanceScores,

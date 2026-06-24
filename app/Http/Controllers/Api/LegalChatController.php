@@ -54,6 +54,8 @@ class LegalChatController extends Controller
     // -------------------------------------------------------------------------
     public function show(Chat $chat): JsonResponse
     {
+        $this->authorizeChatAccess($chat);
+
         return response()->json(['data' => $chat]);
     }
 
@@ -62,6 +64,8 @@ class LegalChatController extends Controller
     // -------------------------------------------------------------------------
     public function updateTitle(Request $request, Chat $chat): JsonResponse
     {
+        $this->authorizeChatAccess($chat);
+
         $request->validate([
             'title' => ['required', 'string', 'max:255'],
         ]);
@@ -76,6 +80,8 @@ class LegalChatController extends Controller
     // -------------------------------------------------------------------------
     public function destroy(Chat $chat): JsonResponse
     {
+        $this->authorizeChatAccess($chat);
+
         $chat->delete();
 
         return response()->json(['message' => 'Chat deleted.']);
@@ -86,7 +92,10 @@ class LegalChatController extends Controller
     // -------------------------------------------------------------------------
     public function messages(Chat $chat): JsonResponse
     {
+        $this->authorizeChatAccess($chat);
+
         $messages = $chat->messages()
+            ->with('latestHumanReview')
             ->select(['id', 'chat_id', 'role', 'content', 'meta', 'created_at'])
             ->get()
             ->map(fn ($m) => $this->formatMessage($m));
@@ -99,6 +108,8 @@ class LegalChatController extends Controller
     // -------------------------------------------------------------------------
     public function sendMessage(StoreChatMessageRequest $request, Chat $chat): JsonResponse
     {
+        $this->authorizeChatAccess($chat);
+
         set_time_limit(180);
         try {
             $result = $this->orchestrator->handle(
@@ -140,6 +151,8 @@ class LegalChatController extends Controller
     // -------------------------------------------------------------------------
     public function streamMessage(StoreChatMessageRequest $request, Chat $chat): StreamedResponse
     {
+        $this->authorizeChatAccess($chat);
+
         return response()->stream(function () use ($request, $chat) {
 
             set_time_limit(300);
@@ -229,6 +242,9 @@ class LegalChatController extends Controller
                         'eval_enabled'     => $assistantMessage->meta['eval_enabled']     ?? false,
                         'eval_status'      => $assistantMessage->meta['eval_status']      ?? null,
                         'answer_correction' => $assistantMessage->meta['answer_correction'] ?? null,
+                        'requested_sources' => $assistantMessage->meta['requested_sources'] ?? [],
+                        'sources_active'    => $assistantMessage->meta['sources_active']    ?? [],
+                        'source_status'     => $assistantMessage->meta['source_status']     ?? [],
                     ],
                 ]);
 
@@ -275,6 +291,7 @@ class LegalChatController extends Controller
             'german_citations'      => $message->meta['german_citations']       ?? [],
             'const_court_citations' => $message->meta['const_court_citations']  ?? [],
             'eval'                  => $message->meta['eval']                   ?? null,
+            'human_review'          => $this->formatHumanReview($message),
             'meta'          => [
                 'retrieval_mode'   => $message->meta['retrieval_mode']   ?? null,
                 'answer_mode'      => $message->meta['answer_mode']      ?? null,
@@ -285,8 +302,48 @@ class LegalChatController extends Controller
                 'pipeline_ms'      => $message->meta['pipeline_ms']      ?? null,
                 'eval_enabled'     => $message->meta['eval_enabled']     ?? false,
                 'eval_status'      => $message->meta['eval_status']      ?? null,
+                'requested_sources' => $message->meta['requested_sources'] ?? [],
+                'sources_active'    => $message->meta['sources_active']    ?? [],
+                'source_status'     => $message->meta['source_status']     ?? [],
             ],
             'created_at' => $message->created_at?->toISOString(),
+        ];
+    }
+
+    private function authorizeChatAccess(Chat $chat): void
+    {
+        abort_unless((int) $chat->user_id === (int) auth()->id(), 404);
+    }
+
+    private function formatHumanReview(ChatMessage $message): ?array
+    {
+        $review = $message->relationLoaded('latestHumanReview')
+            ? $message->latestHumanReview
+            : null;
+
+        if ($review === null) {
+            return null;
+        }
+
+        return [
+            'id' => $review->id,
+            'overall_score' => $review->overall_score,
+            'legal_accuracy_score' => $review->legal_accuracy_score,
+            'norm_coverage_score' => $review->norm_coverage_score,
+            'case_law_score' => $review->case_law_score,
+            'source_routing_score' => $review->source_routing_score,
+            'clarity_score' => $review->clarity_score,
+            'verdict' => $review->verdict,
+            'correct_norms' => $review->correct_norms ?? [],
+            'incorrect_norms' => $review->incorrect_norms ?? [],
+            'missing_norms' => $review->missing_norms ?? [],
+            'correct_cases' => $review->correct_cases ?? [],
+            'irrelevant_cases' => $review->irrelevant_cases ?? [],
+            'missing_cases' => $review->missing_cases ?? [],
+            'source_checks' => $review->source_checks ?? [],
+            'improvement_actions' => $review->improvement_actions ?? [],
+            'notes' => $review->notes,
+            'updated_at' => $review->updated_at?->toISOString(),
         ];
     }
 }

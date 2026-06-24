@@ -16,6 +16,13 @@ Latest large-casus hardening:
   - `LegalNormCoveragePlannerService` converts matched issues into ArticleDetector-compatible Matsne article refs
   - `ArticleDetectorService` now merges registry-planned article refs with the older hardcoded concept fallback, so existing behavior is preserved while new norm routing can grow from config
   - Initial mapped issues include magistrate claim value, counterclaim subject-matter guard, real-estate registration, mortgage priority/enforcement, insolvency creditor status, inheritance/marital property, personal-data incidents, administrative review, labor termination/non-compete/material liability, damages, penalty reduction, criminal preclusion, proof burden, and procedural joinder
+- German comparative source routing was fixed:
+  - selecting the German source in the UI now prevents domestic norm-only routing from suppressing German retrieval
+  - explicit German-practice signals in the question (for example "გერმანიის სასამართლო პრაქტიკა" / "გერმანული გადაწყვეტილებები") now auto-enable German retrieval even when default sources are only court + Matsne
+  - DB smoke check confirmed German data is present: `german_cases` ≈ 242k and `german_chunks_de` ≈ 7k embedded chunks
+- Source routing now follows the same override rule for extra databases:
+  - selected or explicitly requested ECHR/EU/German/Constitutional Court sources are no longer suppressed by domestic norm-only routing
+  - explicit EU and Constitutional Court signals now produce source-plan flags and unit coverage, matching the German fix
 - Dynamic answer model routing is in place:
   - small/ordinary questions can use `gpt-4.1-mini`
   - full/large casus questions can use `gpt-4.1`

@@ -55,6 +55,43 @@ class KnowledgeSourceRouter
         'სასჯელის უკუძალა',
     ];
 
+    private const EU_SIGNALS = [
+        'eu',
+        'ევროკავშირ',
+        'ევროკავშირის სამართალ',
+        'ევროპული კავშირ',
+        'directive',
+        'regulation',
+        'cjeu',
+        'court of justice',
+    ];
+
+    private const GERMAN_SIGNALS = [
+        'გერმან',
+        'გერმანიის სასამართლო',
+        'გერმანული სასამართლო',
+        'გერმანული პრაქტიკ',
+        'გერმანიის პრაქტიკ',
+        'გერმანული გადაწყვეტილ',
+        'german',
+        'germany',
+        'deutsch',
+        'bgh',
+        'bundesgerichtshof',
+        'bundesverfassungsgericht',
+        'bundesarbeitsgericht',
+        'olg',
+    ];
+
+    private const CONST_COURT_SIGNALS = [
+        'საკონსტიტუციო სასამართლო',
+        'საკონსტიტუციო პრაქტიკ',
+        'კონსტიტუციური სარჩელ',
+        'კონსტიტუციურობა',
+        'არაკონსტიტუციურ',
+        'constitutional court',
+    ];
+
     /**
      * Plan which knowledge sources to query.
      *
@@ -71,12 +108,18 @@ class KnowledgeSourceRouter
         $lower       = mb_strtolower($query);
         $useLaw      = $this->matchesAny($lower, self::LAW_SIGNALS);
         $useEchr     = $this->matchesAny($lower, self::ECHR_SIGNALS);
+        $useEu       = $this->matchesAny($lower, self::EU_SIGNALS);
+        $useGerman   = $this->matchesAny($lower, self::GERMAN_SIGNALS);
+        $useConstCourt = $this->matchesAny($lower, self::CONST_COURT_SIGNALS);
         $useDomestic = !$this->isPureLawTextLookup($lower) && !$this->isEchrOnly($lower, $useEchr, $useLaw);
 
         return new SourcePlan(
             useDomestic: $useDomestic,
             useLaw:      $useLaw,
             useEchr:     $useEchr,
+            useEu:       $useEu,
+            useGerman:   $useGerman,
+            useConstCourt: $useConstCourt,
         );
     }
 
@@ -85,6 +128,9 @@ class KnowledgeSourceRouter
         $lower   = mb_strtolower($parsed->raw);
         $useLaw  = $this->matchesAny($lower, self::LAW_SIGNALS) || $parsed->hasLawHint();
         $useEchr = $parsed->hasEchrHint() || $this->matchesAny($lower, self::ECHR_SIGNALS);
+        $useEu = $this->matchesAny($lower, self::EU_SIGNALS);
+        $useGerman = $this->matchesAny($lower, self::GERMAN_SIGNALS);
+        $useConstCourt = $this->matchesAny($lower, self::CONST_COURT_SIGNALS);
 
         // Pure ECHR query: skip domestic + law
         if ($parsed->echrOnly) {
@@ -97,6 +143,9 @@ class KnowledgeSourceRouter
             useDomestic: $useDomestic,
             useLaw:      $useLaw,
             useEchr:     $useEchr,
+            useEu:       $useEu,
+            useGerman:   $useGerman,
+            useConstCourt: $useConstCourt,
         );
     }
 

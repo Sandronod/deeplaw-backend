@@ -26,4 +26,34 @@ class KnowledgeSourceRouterTest extends TestCase
         $this->assertSame('7', $parsed->echrArticle);
         $this->assertTrue($parsed->hasEchrHint());
     }
+
+    public function test_german_practice_signal_enables_german_source_plan(): void
+    {
+        $router = new KnowledgeSourceRouter();
+
+        $plan = $router->plan('გერმანიის სასამართლო პრაქტიკა შრომითი ხელშეკრულების შეწყვეტაზე მომიძებნე');
+
+        $this->assertTrue($plan->useGerman);
+        $this->assertContains('german', $plan->sourcesActive());
+    }
+
+    public function test_eu_signal_enables_eu_source_plan(): void
+    {
+        $router = new KnowledgeSourceRouter();
+
+        $plan = $router->plan('ევროკავშირის სამართლის პრაქტიკა მომხმარებელთა დაცვის საკითხზე მომიძებნე');
+
+        $this->assertTrue($plan->useEu);
+        $this->assertContains('eu', $plan->sourcesActive());
+    }
+
+    public function test_constitutional_court_signal_enables_const_court_source_plan(): void
+    {
+        $router = new KnowledgeSourceRouter();
+
+        $plan = $router->plan('საკონსტიტუციო სასამართლოს პრაქტიკა საკუთრების უფლებაზე მომიძებნე');
+
+        $this->assertTrue($plan->useConstCourt);
+        $this->assertContains('const_court', $plan->sourcesActive());
+    }
 }
