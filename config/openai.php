@@ -23,6 +23,50 @@ return [
     'max_tokens'        => (int) env('OPENAI_MAX_TOKENS', 2200),
     'temperature'       => (float) env('OPENAI_TEMPERATURE', 0.2),
 
+    // Per-answer OpenAI usage/cost estimate. Token counts come from API usage
+    // metadata; prices are configurable because provider rates can change.
+    'cost_tracking' => [
+        'enabled' => (bool) env('OPENAI_COST_TRACKING_ENABLED', true),
+        'currency' => env('OPENAI_COST_CURRENCY', 'USD'),
+        'pricing_per_1m_tokens' => [
+            'gpt-4.1' => [
+                'input' => (float) env('OPENAI_PRICE_GPT_4_1_INPUT_PER_1M_USD', 2.00),
+                'cached_input' => (float) env('OPENAI_PRICE_GPT_4_1_CACHED_INPUT_PER_1M_USD', 0.50),
+                'output' => (float) env('OPENAI_PRICE_GPT_4_1_OUTPUT_PER_1M_USD', 8.00),
+            ],
+            'gpt-4.1-mini' => [
+                'input' => (float) env('OPENAI_PRICE_GPT_4_1_MINI_INPUT_PER_1M_USD', 0.40),
+                'cached_input' => (float) env('OPENAI_PRICE_GPT_4_1_MINI_CACHED_INPUT_PER_1M_USD', 0.10),
+                'output' => (float) env('OPENAI_PRICE_GPT_4_1_MINI_OUTPUT_PER_1M_USD', 1.60),
+            ],
+            'gpt-4.1-nano' => [
+                'input' => (float) env('OPENAI_PRICE_GPT_4_1_NANO_INPUT_PER_1M_USD', 0.10),
+                'cached_input' => (float) env('OPENAI_PRICE_GPT_4_1_NANO_CACHED_INPUT_PER_1M_USD', 0.025),
+                'output' => (float) env('OPENAI_PRICE_GPT_4_1_NANO_OUTPUT_PER_1M_USD', 0.40),
+            ],
+            'o4-mini' => [
+                'input' => (float) env('OPENAI_PRICE_O4_MINI_INPUT_PER_1M_USD', 1.10),
+                'cached_input' => (float) env('OPENAI_PRICE_O4_MINI_CACHED_INPUT_PER_1M_USD', 0.275),
+                'output' => (float) env('OPENAI_PRICE_O4_MINI_OUTPUT_PER_1M_USD', 4.40),
+            ],
+            'text-embedding-3-large' => [
+                'input' => (float) env('OPENAI_PRICE_TEXT_EMBEDDING_3_LARGE_INPUT_PER_1M_USD', 0.13),
+                'cached_input' => 0.0,
+                'output' => 0.0,
+            ],
+            'text-embedding-3-small' => [
+                'input' => (float) env('OPENAI_PRICE_TEXT_EMBEDDING_3_SMALL_INPUT_PER_1M_USD', 0.02),
+                'cached_input' => 0.0,
+                'output' => 0.0,
+            ],
+            'default' => [
+                'input' => (float) env('OPENAI_PRICE_DEFAULT_INPUT_PER_1M_USD', 0.0),
+                'cached_input' => (float) env('OPENAI_PRICE_DEFAULT_CACHED_INPUT_PER_1M_USD', 0.0),
+                'output' => (float) env('OPENAI_PRICE_DEFAULT_OUTPUT_PER_1M_USD', 0.0),
+            ],
+        ],
+    ],
+
     // Text sent to OpenAI per decision (chars).
     'max_chars_per_decision'  => (int) env('MAX_CHARS_PER_DECISION', 7000),
 

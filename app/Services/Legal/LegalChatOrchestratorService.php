@@ -21,6 +21,7 @@ use App\Services\AI\CaseRelevanceScorerService;
 use App\Services\AI\HyDEService;
 use App\Services\AI\OllamaEmbeddingService;
 use App\Services\AI\OpenAIEmbeddingService;
+use App\Services\AI\OpenAIUsageTrackerService;
 use App\Contracts\AnswerServiceInterface;
 use App\Services\AI\QueryParserService;
 use App\Services\AI\DecisionAuthorityScorer;
@@ -72,6 +73,7 @@ class LegalChatOrchestratorService
         private readonly AnswerPostProcessorService $answerPostProcessor,
         private readonly EvalJudgeService           $evalJudge,
         private readonly LegalRuleExtractorService  $ruleExtractor,
+        private readonly OpenAIUsageTrackerService  $openAiUsageTracker,
     ) {}
 
     private function normalizeSources(array $sources): array
@@ -116,6 +118,7 @@ class LegalChatOrchestratorService
      */
     public function prepare(Chat $chat, string $userQuestion, array $sources = [], ?callable $progress = null): array
     {
+        $this->openAiUsageTracker->reset();
         $this->reportProgress($progress, 'preparing');
         $sources = $this->normalizeSources($sources);
 
@@ -912,6 +915,7 @@ PROMPT;
             $overallConfidence = 'medium';
         }
         $evalEnabled = (bool) config('openai.judge_enabled', false) && ($ctx['mode'] ?? 'explain') !== 'chat';
+        $openAiUsage = $this->openAiUsageTracker->summary();
         $timings['finalize_before_save'] = $this->elapsedMs($finalizeStartedAt);
 
         return ChatMessage::create([
@@ -1010,6 +1014,7 @@ PROMPT;
                 ],
 
                 // ── LLM-as-Judge evaluation (filled later via runEval) ───────
+                'openai_usage' => $openAiUsage,
                 'eval' => null,
                 'eval_enabled' => $evalEnabled,
                 'eval_status' => $evalEnabled ? ($evalWillRun ? 'pending' : 'not_requested') : 'disabled',
@@ -1051,6 +1056,7 @@ PROMPT;
             $meta['eval'] = $evalResult;
             $meta['eval_status'] = 'completed';
             $meta['eval_completed_at'] = now()->toISOString();
+            $meta['openai_usage'] = $this->openAiUsageTracker->summary();
             $message->update(['meta' => $meta]);
 
             return $evalResult;

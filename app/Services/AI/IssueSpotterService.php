@@ -37,7 +37,9 @@ SAMPLE OUTPUT:
 ]
 FEWSHOT;
 
-    public function __construct()
+    public function __construct(
+        private readonly OpenAIUsageTrackerService $usageTracker,
+    )
     {
         $this->apiKey  = config('openai.api_key');
         $this->model   = config('openai.extraction_model', 'gpt-4.1-mini');
@@ -75,6 +77,8 @@ FEWSHOT;
                 Log::warning('IssueSpotter: API error', ['status' => $response->status()]);
                 return IssueList::empty();
             }
+
+            $this->usageTracker->recordChat('issue_spotting', $this->model, $response->json('usage') ?? null);
 
             $content = trim($response->json('choices.0.message.content') ?? '');
             $issues  = $this->parse($content);

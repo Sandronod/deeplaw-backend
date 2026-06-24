@@ -12,7 +12,9 @@ class HyDEService
     private string $model;
     private string $baseUrl;
 
-    public function __construct()
+    public function __construct(
+        private readonly OpenAIUsageTrackerService $usageTracker,
+    )
     {
         $this->apiKey  = config('openai.api_key');
         $this->model   = config('openai.chat_model', 'gpt-4.1');
@@ -54,6 +56,8 @@ PROMPT,
                 ]);
 
             if ($response->successful()) {
+                $this->usageTracker->recordChat('hyde_generation', $this->model, $response->json('usage') ?? null);
+
                 $text = trim($response->json('choices.0.message.content') ?? '');
                 if (!empty($text)) {
                     Log::debug('HyDE generated', ['query' => $query, 'length' => mb_strlen($text)]);

@@ -23,7 +23,9 @@ class LegalRuleExtractorService
     private string $model;
     private string $baseUrl;
 
-    public function __construct()
+    public function __construct(
+        private readonly OpenAIUsageTrackerService $usageTracker,
+    )
     {
         $this->apiKey  = config('openai.api_key');
         $this->model   = config('openai.extraction_model', 'gpt-4.1-mini');
@@ -76,6 +78,8 @@ class LegalRuleExtractorService
                 Log::warning('RuleExtractor: API error', ['status' => $response->status()]);
                 return [];
             }
+
+            $this->usageTracker->recordChat('rule_extraction', $this->model, $response->json('usage') ?? null);
 
             $content = trim($response->json('choices.0.message.content') ?? '');
             $rules   = $this->parse($content);

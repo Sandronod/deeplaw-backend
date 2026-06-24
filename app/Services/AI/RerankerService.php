@@ -20,9 +20,11 @@ class RerankerService
     private string $apiKey;
     private string $model;
     private string $baseUrl;
+    private OpenAIUsageTrackerService $usageTracker;
 
-    public function __construct()
+    public function __construct(?OpenAIUsageTrackerService $usageTracker = null)
     {
+        $this->usageTracker = $usageTracker ?? app(OpenAIUsageTrackerService::class);
         $this->apiKey  = config('openai.api_key');
         $this->model   = config('openai.extraction_model', 'gpt-4.1-mini');
         $this->baseUrl = config('openai.base_url', 'https://api.openai.com/v1');
@@ -85,6 +87,8 @@ class RerankerService
                 ]);
                 return array_merge($pinned, array_slice($decisions, 0, $remainingSlots));
             }
+
+            $this->usageTracker->recordChat('reranking', $this->model, $response->json('usage') ?? null);
 
             $content   = trim($response->json('choices.0.message.content') ?? '');
             $rankedIds = $this->parseIds($content);

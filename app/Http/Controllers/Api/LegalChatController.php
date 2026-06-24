@@ -245,15 +245,23 @@ class LegalChatController extends Controller
                         'requested_sources' => $assistantMessage->meta['requested_sources'] ?? [],
                         'sources_active'    => $assistantMessage->meta['sources_active']    ?? [],
                         'source_status'     => $assistantMessage->meta['source_status']     ?? [],
+                        'openai_usage'      => $assistantMessage->meta['openai_usage']      ?? null,
                     ],
                 ]);
 
                 // ── Stage 4: eval runs after done (non-blocking UX) ───────────
                 $evalResult = $this->orchestrator->runEval($assistantMessage, $ctx, $finalText);
                 if ($evalResult !== null) {
+                    $freshMessage = $assistantMessage->fresh();
+                    $freshMeta = $freshMessage?->meta ?? [];
+
                     $emit('eval', [
                         'message_id' => $assistantMessage->id,
                         'eval'       => $evalResult,
+                        'meta'       => [
+                            'eval_status'  => $freshMeta['eval_status'] ?? 'completed',
+                            'openai_usage' => $freshMeta['openai_usage'] ?? null,
+                        ],
                     ]);
                 }
 
@@ -305,6 +313,7 @@ class LegalChatController extends Controller
                 'requested_sources' => $message->meta['requested_sources'] ?? [],
                 'sources_active'    => $message->meta['sources_active']    ?? [],
                 'source_status'     => $message->meta['source_status']     ?? [],
+                'openai_usage'      => $message->meta['openai_usage']      ?? null,
             ],
             'created_at' => $message->created_at?->toISOString(),
         ];

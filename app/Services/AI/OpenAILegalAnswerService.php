@@ -32,6 +32,7 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
         private readonly LegalRemedyGuardService    $remedyGuard,
         private readonly LegalConsequenceTaxonomyService $consequenceTaxonomy,
         private readonly LegalSourceCoverageGuardService $sourceCoverageGuard,
+        private readonly OpenAIUsageTrackerService  $usageTracker,
     ) {
         $this->apiKey      = config('openai.api_key');
         $this->model       = config('openai.chat_model', 'gpt-4.1');
@@ -118,6 +119,8 @@ class OpenAILegalAnswerService implements \App\Contracts\AnswerServiceInterface
                 'mode'              => $mode,
                 'confidence'        => $confidence->label,
             ]);
+
+            $this->usageTracker->recordChat('answer_generation', $model, $data['usage'] ?? null);
 
             return trim($data['choices'][0]['message']['content']);
 
@@ -1338,6 +1341,9 @@ BLOCK;
                 'max_tokens'  => $this->maxTokens,
                 'temperature' => $this->temperature,
                 'stream'      => true,
+                'stream_options' => [
+                    'include_usage' => true,
+                ],
             ],
             'stream'          => true,
             'connect_timeout' => 10,
@@ -1369,6 +1375,11 @@ BLOCK;
                 }
 
                 $json  = json_decode($data, true);
+                if (isset($json['usage']) && is_array($json['usage'])) {
+                    $this->usageTracker->recordChat('answer_stream', $model, $json['usage']);
+                    continue;
+                }
+
                 $token = $json['choices'][0]['delta']['content'] ?? '';
 
                 if ($token !== '') {

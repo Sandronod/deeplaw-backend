@@ -17,7 +17,9 @@ class EvalJudgeService
     private string $model;
     private string $baseUrl;
 
-    public function __construct()
+    public function __construct(
+        private readonly OpenAIUsageTrackerService $usageTracker,
+    )
     {
         $this->apiKey  = config('openai.api_key');
         $this->model   = config('openai.judge_model', 'o4-mini');
@@ -77,6 +79,8 @@ class EvalJudgeService
                 ]);
                 return $this->failResult('API error ' . $response->status());
             }
+
+            $this->usageTracker->recordChat('eval_judge', $this->model, $response->json('usage') ?? null);
 
             $content = trim($response->json('choices.0.message.content') ?? '');
 

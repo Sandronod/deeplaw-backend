@@ -16,6 +16,7 @@ class QueryExtractorService
     public function __construct(
         private readonly LegalGlossaryService $glossary,
         private readonly LegalQueryNormalizerService $normalizer,
+        private readonly OpenAIUsageTrackerService $usageTracker,
     )
     {
         $this->apiKey  = config('openai.api_key');
@@ -99,6 +100,7 @@ PROMPT,
                 ]);
 
             $raw = trim($response->json('choices.0.message.content') ?? '');
+            $this->usageTracker->recordChat('query_extraction', $this->model, $response->json('usage') ?? null);
             $raw = preg_replace('/^```(?:json)?\s*/i', '', $raw);
             $raw = preg_replace('/\s*```$/i', '', $raw);
 

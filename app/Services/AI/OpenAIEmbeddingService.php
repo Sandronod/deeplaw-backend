@@ -13,7 +13,9 @@ class OpenAIEmbeddingService implements \App\Contracts\EmbeddingServiceInterface
     private string $baseUrl;
     private int    $timeout;
 
-    public function __construct()
+    public function __construct(
+        private readonly OpenAIUsageTrackerService $usageTracker,
+    )
     {
         $this->apiKey  = config('openai.api_key');
         $this->model   = config('openai.embedding_model', 'text-embedding-3-large');
@@ -63,6 +65,8 @@ class OpenAIEmbeddingService implements \App\Contracts\EmbeddingServiceInterface
             if (empty($data['data'])) {
                 throw new RuntimeException('OpenAI returned empty embedding.');
             }
+
+            $this->usageTracker->recordEmbedding('embedding', $this->model, $data['usage'] ?? null);
 
             // OpenAI guarantees data[].index matches input order
             $embeddings = [];

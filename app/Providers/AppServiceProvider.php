@@ -9,6 +9,7 @@ use App\Services\AI\GeminiLegalAnswerService;
 use App\Services\AI\OllamaEmbeddingService;
 use App\Services\AI\OpenAIEmbeddingService;
 use App\Services\AI\OpenAILegalAnswerService;
+use App\Services\AI\OpenAIUsageTrackerService;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\ServiceProvider;
@@ -18,6 +19,8 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
+        $this->app->scoped(OpenAIUsageTrackerService::class);
+
         $provider = config('ai.provider', 'openai');
 
         if ($provider === 'gemini') {
